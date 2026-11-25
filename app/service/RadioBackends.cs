@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-namespace NekoDrop.Service;
+namespace Airdraft.Service;
 
 /// <summary>What the service knows when it starts a card's radio daemon.</summary>
 /// <param name="Profile">the card (CardCatalog): IDs, capabilities, and RadioFamily when chosen by hand</param>
@@ -42,6 +42,7 @@ public static class RadioBackends
     {
         new IwxRadioBackend(),
         new DevourerRadioBackend(),
+        new Rtl8852beRadioBackend(),
     }.ToDictionary(b => b.Kind);
 
     public static IRadioBackend Get(RadioBackendKind kind) =>
@@ -51,14 +52,14 @@ public static class RadioBackends
 }
 
 /// <summary>
-/// Intel 22000 / AX210 families: nekodrop-radio.exe (iwxradio, ported from
+/// Intel 22000 / AX210 families: airdraft-radio.exe (iwxradio, ported from
 /// ForbiddenItlwm). Station, A-MPDU, kernel driver; faster sending (64 frames
 /// in flight) always on since 0.1.25; --family when the model was chosen by hand.
 /// </summary>
 public sealed class IwxRadioBackend : IRadioBackend
 {
     public RadioBackendKind Kind => RadioBackendKind.Iwx;
-    public string ExeName => "nekodrop-radio.exe";
+    public string ExeName => "airdraft-radio.exe";
 
     public IReadOnlyList<string> BuildArgs(RadioStart s)
     {
@@ -84,13 +85,22 @@ public sealed class IwxRadioBackend : IRadioBackend
 
 /// <summary>
 /// Realtek RTL8852CE: winawdl's radio (winawdl_radio.exe on raph559/devourer's
-/// Windows PCIe backend), shipped as nekodrop-radio-rtl.exe. Monitor and
+/// Windows PCIe backend), shipped as airdraft-radio-rtl.exe. Monitor and
 /// inject only, no station: CardCatalog runs it on demand.
 /// </summary>
 public sealed class DevourerRadioBackend : IRadioBackend
 {
     public RadioBackendKind Kind => RadioBackendKind.Devourer;
-    public string ExeName => "nekodrop-radio-rtl.exe";
+    public string ExeName => "airdraft-radio-rtl.exe";
 
     public IReadOnlyList<string> BuildArgs(RadioStart s) => [s.Channel.ToString(), "--width", s.Width.ToString()];
+}
+
+internal sealed class Rtl8852beRadioBackend : IRadioBackend
+{
+    public RadioBackendKind Kind => RadioBackendKind.Devourer8852be;
+    public string ExeName => "airdraft-radio-rtl8852be.exe";
+
+    public IReadOnlyList<string> BuildArgs(RadioStart s) =>
+        [s.Channel.ToString(), "--width", "20", "--no-block-ack", "--no-aggregate", "--no-quick-submit"];
 }

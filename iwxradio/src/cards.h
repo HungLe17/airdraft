@@ -33,7 +33,7 @@ constexpr uint32_t mac_step(uint32_t hw_rev) { return (hw_rev & 0x000000C) >> 2;
 constexpr uint32_t rf_type(uint32_t rf_id) { return (rf_id & 0x0FFF000) >> 12; }
 constexpr bool rf_cdb(uint32_t rf_id) { return (rf_id >> 28) & 1; }
 
-/* The PCI device IDs nekodrop binds to (the register proxy's INF lists the same). */
+/* The PCI device IDs Airdraft binds to (the register proxy's INF lists the same). */
 constexpr uint16_t kDeviceIds[] = {0x02F0, 0x06F0, 0x34F0, 0x3DF0, 0x4DF0, 0x43F0, 0xA0F0, 0x2723,
                                    0x2725, 0x7A70, 0x7AF0, 0x51F0, 0x51F1, 0x54F0, 0x7F70};
 
@@ -73,7 +73,7 @@ inline CardInfo select(uint16_t device, uint32_t hw_rev, uint32_t rf_id) {
   case 0x2720: c.why = "Intel QnJ (8086:2720): its firmware (QuQnj, API 48) is not shipped upstream"; return c;
   case 0x2726: c.why = "Intel SnJ (8086:2726): its firmware (SoSnj, API 63) is not shipped upstream"; return c;
   case 0x2729: case 0x7E40: c.why = "Intel Ma (Meteor Lake CNVi): its firmware (ma, API 63) is not shipped upstream"; return c;
-  default: c.why = "not an Intel Wi-Fi 6/6E card nekodrop knows"; return c;
+  default: c.why = "not an Intel Wi-Fi 6/6E card Airdraft knows"; return c;
   }
 
   const uint32_t mac = mac_type(hw_rev), rf = rf_type(rf_id);

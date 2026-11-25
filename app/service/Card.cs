@@ -3,7 +3,7 @@ using System.ComponentModel;
 using System.Runtime.InteropServices;
 using System.Text;
 
-namespace NekoDrop.Service;
+namespace Airdraft.Service;
 
 /// <summary>Windows refused to bind a driver to the card (with its error code).</summary>
 public sealed class CardBindException(string message, Exception inner) : Exception(message, inner);
@@ -28,51 +28,51 @@ public static class Card
     /// <param name="Provider">the bound driver's provider (class key ProviderName)</param>
     /// <param name="Problem">Device Manager's problem code (0: none, or the device is not started yet)</param>
     public sealed record Info(string InstanceId, string HardwareId, string Service, string InfPath,
-                              AdapterProfile Profile, string Provider = "", uint Problem = 0);
+                              AdapterProfile Profile, string Provider = "", uint Problem = 0, Guid? InterfaceId = null);
 
     /// <summary>The user's manual choice (Settings, "Wi-Fi card"): a PCI hardware ID and a CardCatalog.ManualModels key.</summary>
     public static (string HardwareId, string Model) Manual { get; set; } = ("", "");
 
     /// <summary>
-    /// The card to drive: a card the catalog recognizes by its ID first; when
-    /// there is none, the card the user matched to a model by hand.
+    /// The single physical PCI device selected for this build.
     /// </summary>
     public static Info? Find()
     {
-        Info? manual = null;
-        var (manualHw, manualModel) = Manual;
         var set = SetupDiGetClassDevsW(IntPtr.Zero, "PCI", IntPtr.Zero, DIGCF_PRESENT | DIGCF_ALLCLASSES);
         if (set == new IntPtr(-1)) return null;
         try
         {
+            Info? selected = null;
             var data = new SP_DEVINFO_DATA { cbSize = (uint)Marshal.SizeOf<SP_DEVINFO_DATA>() };
             for (uint i = 0; SetupDiEnumDeviceInfo(set, i, ref data); i++)
             {
                 var id = InstanceId(set, ref data);
-                // Only active profiles: cards listed for diagnostics only are never taken.
-                var profile = CardCatalog.MatchActive(id);
-                if (profile is null && manual is null && manualHw.Length > 0 &&
-                    id.StartsWith(manualHw, StringComparison.OrdinalIgnoreCase) &&
-                    (id.Length == manualHw.Length || id[manualHw.Length] is '&' or '\\'))
-                {
-                    if (CardCatalog.ManualProfile(id, manualModel) is { } mp) manual = Describe(set, ref data, id, mp);
-                    continue;
-                }
-                if (profile is null) continue;
-                return Describe(set, ref data, id, profile);
+                if (CardCatalog.MatchPreview(id) is not { } profile) continue;
+                // The forced bind acts on every device with the supplied hardware ID.
+                if (selected is not null) return null;
+                selected = Describe(set, ref data, id, profile);
             }
+            return selected;
         }
         finally { SetupDiDestroyDeviceInfoList(set); }
-        return manual;
+    }
+
+    public static Guid? VendorWlanInterface(string? instanceId = null)
+    {
+        var card = Find();
+        if (card is not { Problem: 0 } || BoundToProxy(card) ||
+            (instanceId is not null && !string.Equals(card.InstanceId, instanceId, StringComparison.OrdinalIgnoreCase)))
+            return null;
+        return card.InterfaceId;
     }
 
     static Info Describe(IntPtr set, ref SP_DEVINFO_DATA data, string id, AdapterProfile profile)
     {
         var service = RegistryProperty(set, ref data, SPDRP_SERVICE);
-        var (inf, provider) = DriverInf(id);
+        var (inf, provider, interfaceId) = DriverInf(id);
         uint problem = 0;
         if (CM_Get_DevNode_Status(out _, out var p, data.DevInst, 0) == 0) problem = p;
-        return new Info(id, profile.HardwareId, service, inf, profile, provider, problem);
+        return new Info(id, profile.HardwareId, service, inf, profile, provider, problem, interfaceId);
     }
 
     /// <summary>A PCI device that may be a Wi-Fi card, for the manual choice.</summary>
@@ -84,7 +84,7 @@ public static class Card
 
     /// <summary>
     /// PCI network controllers (class Net, the proxy's class, or no driver at
-    /// all) from vendors with a nekodrop backend, for Settings' card list.
+    /// all) from vendors with a Airdraft backend, for Settings' card list.
     /// </summary>
     public static IReadOnlyList<Candidate> Candidates()
     {
@@ -99,7 +99,7 @@ public static class Card
             {
                 var id = InstanceId(set, ref data);
                 if (!CardCatalog.TryParsePciId(id, out var v, out var d) || !vendors.Contains(v)) continue;
-                var recognized = CardCatalog.MatchActive(id) is not null;
+                var recognized = CardCatalog.MatchPreview(id) is not null;
                 var className = RegistryProperty(set, ref data, SPDRP_CLASS);
                 // Network adapters, the proxy's own class, or a card with no driver yet;
                 // never the vendors' Ethernet chips' audio, USB or bridge functions.
@@ -118,7 +118,7 @@ public static class Card
         string.Equals(card.Service, card.Profile.ProxyService, StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Bound to nekodrop's proxy, running or not. The INF name says nothing
+    /// Bound to Airdraft's proxy, running or not. The INF name says nothing
     /// (Windows renames it oemNN.inf), so the proxy INF's Provider tells it
     /// apart: a proxy that failed to start was taken for the vendor's driver
     /// and recorded as the one to give the card back to (issue #12).
@@ -134,26 +134,19 @@ public static class Card
         card.Profile.Capabilities.SupportsKernelDriver &&
         string.Equals(card.Service, "nekodrop-wlan", StringComparison.OrdinalIgnoreCase);
 
-    /// <summary>Binds `inf` to the card, whatever ranks higher.</summary>
     /// <summary>
-    /// Binds `inf` to the card, whatever ranks higher. The call has been seen to
-    /// block for minutes (hardware, 2026-11-17); after `timeout` the caller goes
-    /// on and checks which driver owns the card.
+    /// Binds the selected INF and reports whether Windows needs a restart.
+    /// The caller must hold the adapter operation gate until Windows returns.
     /// </summary>
-    public static void Bind(string hardwareId, string inf, TimeSpan? timeout = null)
+    public static bool Bind(string hardwareId, string inf)
     {
-        var call = Task.Run(() =>
+        if (!UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, hardwareId, inf,
+                                                INSTALLFLAG_FORCE | INSTALLFLAG_NONINTERACTIVE, out var reboot))
         {
-            if (!UpdateDriverForPlugAndPlayDevicesW(IntPtr.Zero, hardwareId, inf, INSTALLFLAG_FORCE, out _))
-            {
-                var w = new Win32Exception(Marshal.GetLastWin32Error());
-                throw new CardBindException(
-                    $"binding {Path.GetFileName(inf)} failed: 0x{w.NativeErrorCode:x8} {w.Message}", w);
-            }
-        });
-        if (!call.Wait(timeout ?? TimeSpan.FromSeconds(45)))
-            return; /* still running; the device state decides */
-        if (call.Exception is { } e) throw e.InnerException ?? e;
+            var w = new Win32Exception(Marshal.GetLastWin32Error());
+            throw new CardBindException($"binding {Path.GetFileName(inf)} failed: 0x{w.NativeErrorCode:x8} {w.Message}", w);
+        }
+        return reboot;
     }
 
     static string InstanceId(IntPtr set, ref SP_DEVINFO_DATA data)
@@ -171,20 +164,22 @@ public static class Card
     }
 
     /// <summary>The INF the card is bound to, as a full path (C:\Windows\INF\oemNN.inf), and its provider.</summary>
-    static (string Inf, string Provider) DriverInf(string instanceId)
+    static (string Inf, string Provider, Guid? InterfaceId) DriverInf(string instanceId)
     {
         using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
             $@"SYSTEM\CurrentControlSet\Enum\{instanceId}");
         var driver = key?.GetValue("Driver") as string;
-        if (driver is null) return ("", "");
+        if (driver is null) return ("", "", null);
         using var cls = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(
             $@"SYSTEM\CurrentControlSet\Control\Class\{driver}");
         var inf = cls?.GetValue("InfPath") as string;
         var provider = cls?.GetValue("ProviderName") as string ?? "";
-        return (inf is null ? "" : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF", inf), provider);
+        Guid? interfaceId = Guid.TryParse(cls?.GetValue("NetCfgInstanceId") as string, out var guid) ? guid : null;
+        return (inf is null ? "" : Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "INF", inf), provider, interfaceId);
     }
 
     const uint DIGCF_PRESENT = 0x2, DIGCF_ALLCLASSES = 0x4, SPDRP_SERVICE = 0x4, INSTALLFLAG_FORCE = 0x1,
+        INSTALLFLAG_NONINTERACTIVE = 0x4,
                SPDRP_DEVICEDESC = 0x0, SPDRP_CLASS = 0x7, SPDRP_FRIENDLYNAME = 0xC;
 
     [StructLayout(LayoutKind.Sequential)]

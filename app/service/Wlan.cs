@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Xml.Linq;
 
-namespace NekoDrop.Service;
+namespace Airdraft.Service;
 
 /// <summary>
 /// The network Windows is connected to, read through the WLAN API before the
@@ -14,29 +14,31 @@ namespace NekoDrop.Service;
 public static class Wlan
 {
     public sealed record Network(string Ssid, string Bssid, int Channel, string Security, string? Passphrase,
-                                 string? PskHex, bool Open);
+                                 string? PskHex, bool Open, string ProfileName = "");
 
     /// <summary>Null when not connected; Security says what kept it from being usable.</summary>
-    public static Network? Current(out string why, bool readKey = true)
+    public static Network? Current(out string why, bool readKey = true, Guid? interfaceId = null)
     {
         why = "";
         if (WlanOpenHandle(2, IntPtr.Zero, out _, out var h) != 0) { why = "WLAN service unavailable"; return null; }
         try
         {
-            if (WlanEnumInterfaces(h, IntPtr.Zero, out var listPtr) != 0) { why = "no WLAN interface"; return null; }
+            if (WlanEnumInterfaces(h, IntPtr.Zero, out var listPtr) != 0) { why = "cannot enumerate WLAN interfaces"; return null; }
             try
             {
                 int count = Marshal.ReadInt32(listPtr);
+                why = interfaceId.HasValue ? "Windows could not find the selected WLAN interface" : "Wi-Fi is not connected";
                 for (int i = 0; i < count; i++)
                 {
                     // WLAN_INTERFACE_INFO: GUID (16), WCHAR[256], state (4) = 532 bytes, after 8 header bytes.
                     var item = listPtr + 8 + i * 532;
                     var guid = Marshal.PtrToStructure<Guid>(item);
+                    if (interfaceId.HasValue && guid != interfaceId.Value) continue;
                     var state = Marshal.ReadInt32(item + 16 + 512);
+                    why = "Wi-Fi is not connected";
                     if (state != 1 /* wlan_interface_state_connected */) continue;
                     return Query(h, guid, out why, readKey);
                 }
-                why = "Wi-Fi is not connected";
                 return null;
             }
             finally { WlanFreeMemory(listPtr); }
@@ -49,7 +51,7 @@ public static class Wlan
     /// on a WLAN interface: worth waiting a moment instead of cutting it off,
     /// without calling WlanConnect on saved profiles (#4).
     /// </summary>
-    public static bool IsConnecting()
+    public static bool IsConnecting(Guid interfaceId, bool includeConnected = false)
     {
         if (WlanOpenHandle(2, IntPtr.Zero, out _, out var h) != 0) return false;
         try
@@ -60,13 +62,38 @@ public static class Wlan
                 int count = Marshal.ReadInt32(listPtr);
                 for (int i = 0; i < count; i++)
                 {
-                    var state = Marshal.ReadInt32(listPtr + 8 + i * 532 + 16 + 512);
+                    var item = listPtr + 8 + i * 532;
+                    if (Marshal.PtrToStructure<Guid>(item) != interfaceId) continue;
+                    var state = Marshal.ReadInt32(item + 16 + 512);
                     // 5 associating, 6 discovering, 7 authenticating.
-                    if (state is 5 or 6 or 7) return true;
+                    return state is 5 or 6 or 7 || (includeConnected && state == 1);
                 }
                 return false;
             }
             finally { WlanFreeMemory(listPtr); }
+        }
+        finally { WlanCloseHandle(h, IntPtr.Zero); }
+    }
+
+    /// <summary>Requests the previous saved connection on a disconnected interface.</summary>
+    internal static uint? RequestReconnect(Guid interfaceId, string profile)
+    {
+        if (string.IsNullOrEmpty(profile) || profile.Length > 255 ||
+            WlanOpenHandle(2, IntPtr.Zero, out _, out var h) != 0) return null;
+        try
+        {
+            uint flags = 0;
+            if (WlanGetProfile(h, ref interfaceId, profile, IntPtr.Zero, out var xml, ref flags, out _) != 0) return null;
+            WlanFreeMemory(xml);
+            if (WlanQueryInterface(h, ref interfaceId, 6 /* interface_state */, IntPtr.Zero, out _, out var state, out _) != 0)
+                return null;
+            try
+            {
+                if (Marshal.ReadInt32(state) != 4 /* disconnected */) return null;
+            }
+            finally { WlanFreeMemory(state); }
+            var parameters = new ConnectParameters { Mode = 0 /* saved profile */, Profile = profile, BssType = 1 /* infrastructure */ };
+            return WlanConnect(h, ref interfaceId, in parameters, IntPtr.Zero);
         }
         finally { WlanCloseHandle(h, IntPtr.Zero); }
     }
@@ -85,7 +112,7 @@ public static class Wlan
                     or System.Net.NetworkInformation.NetworkInterfaceType.GigabitEthernet
                     or System.Net.NetworkInformation.NetworkInterfaceType.FastEthernetT
                     or System.Net.NetworkInformation.NetworkInterfaceType.FastEthernetFx &&
-                n.Name != "nekodrop" &&
+                n.Name != "Airdraft" &&
                 !NotWired.Any(d => n.Description.Contains(d, StringComparison.OrdinalIgnoreCase)) &&
                 n.GetIPProperties().GatewayAddresses.Any(g =>
                     g.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork &&
@@ -99,7 +126,7 @@ public static class Wlan
     public sealed record SavedProfile(string Ssid, string? Passphrase, string? PskHex, bool Open);
 
     /// <summary>
-    /// Every saved Wi-Fi profile Windows has that nekodrop's station can use
+    /// Every saved Wi-Fi profile Windows has that Airdraft's station can use
     /// (open or personal WPA/WPA2/WPA3 with a readable key), as SYSTEM.
     /// </summary>
     public static List<SavedProfile> SavedProfiles()
@@ -169,13 +196,14 @@ public static class Wlan
     static Network? Query(IntPtr h, Guid guid, out string why, bool readKey)
     {
         why = "";
-        if (WlanQueryInterface(h, ref guid, 7 /* current_connection */, IntPtr.Zero, out _, out var p, out _) != 0)
+        var connectionError = WlanQueryInterface(h, ref guid, 7 /* current_connection */, IntPtr.Zero, out _, out var p, out _);
+        if (connectionError != 0)
         {
-            why = "cannot read the current connection";
+            why = $"cannot read the current connection (Windows error {connectionError})";
             return null;
         }
         string profile, ssid, bssid;
-        int auth, cipher;
+        int auth, cipher, connectionMode, bssType;
         try
         {
             // WLAN_CONNECTION_ATTRIBUTES: state 4, mode 4, profile WCHAR[256] (512),
@@ -189,11 +217,13 @@ public static class Wlan
                 why = "Wi-Fi is not connected yet";
                 return null;
             }
+            connectionMode = Marshal.ReadInt32(p + 4);
             profile = Marshal.PtrToStringUni(p + 8, 256).TrimEnd('\0');
             var ssidLen = Marshal.ReadInt32(p + 520);
             var ssidBytes = new byte[Math.Clamp(ssidLen, 0, 32)];
             Marshal.Copy(p + 524, ssidBytes, 0, ssidBytes.Length);
             ssid = Encoding.UTF8.GetString(ssidBytes);
+            bssType = Marshal.ReadInt32(p + 556);
             var mac = new byte[6];
             Marshal.Copy(p + 560, mac, 0, 6);
             bssid = string.Join(":", mac.Select(b => b.ToString("x2")));
@@ -202,6 +232,8 @@ public static class Wlan
             cipher = Marshal.ReadInt32(p + sec + 12);
         }
         finally { WlanFreeMemory(p); }
+        // Native recovery can reconnect a saved infrastructure profile, including WLAN AutoConfig connections.
+        var reconnectProfile = bssType == 1 && connectionMode is 0 or 4 ? profile : "";
 
         int channel = 0;
         if (WlanQueryInterface(h, ref guid, 8 /* channel_number */, IntPtr.Zero, out _, out var c, out _) == 0)
@@ -210,21 +242,21 @@ public static class Wlan
             WlanFreeMemory(c);
         }
 
-        // DOT11_AUTH_ALGORITHM: 1 open, 6 RSNA (802.1X), 7 RSNA-PSK, 8 WPA3, 9 WPA3-SAE, 10 OWE.
-        // DOT11_CIPHER_ALGORITHM: 0 none, 4 CCMP.
-        string security = auth switch { 1 => "open", 7 => "WPA2-Personal", 6 => "WPA2-Enterprise", 8 or 9 => "WPA3", 10 => "OWE", _ => $"auth {auth}" };
+        // Windows reports WPA3-Enterprise as 8 or 11 and WPA3-SAE as 9.
+        string security = auth switch { 1 => "open", 7 => "WPA2-Personal", 6 => "WPA2-Enterprise",
+            8 or 11 => "WPA3-Enterprise", 9 => "WPA3-Personal", 10 => "OWE", _ => $"auth {auth}" };
         // Open, and Enhanced Open (OWE): no key; the radio finds OWE in the beacon.
         if ((auth == 1 && cipher == 0) || (auth == 10 && cipher == 4))
-            return new Network(ssid, bssid, channel, security, null, null, true);
+            return new Network(ssid, bssid, channel, security, null, null, true, reconnectProfile);
         // WPA3 (SAE): the radio uses WPA2-PSK where the network also offers it
         // (mixed, issue #12) and SAE with the same password where it does not.
-        var sae = (auth == 8 || auth == 9) && cipher == 4;
+        var sae = auth == 9 && cipher == 4;
         if ((auth != 7 && !sae) || cipher != 4)
         {
             why = $"{security} is not supported beside AirDrop (WPA2/WPA3-Personal or Enhanced Open with AES)";
-            return new Network(ssid, bssid, channel, security, null, null, false);
+            return new Network(ssid, bssid, channel, security, null, null, false, reconnectProfile);
         }
-        if (!readKey) return new Network(ssid, bssid, channel, security, null, null, false);
+        if (!readKey) return new Network(ssid, bssid, channel, security, null, null, false, reconnectProfile);
         uint flags = 4; // WLAN_PROFILE_GET_PLAINTEXT_KEY
         if (WlanGetProfile(h, ref guid, profile, IntPtr.Zero, out var xmlPtr, ref flags, out _) != 0)
         {
@@ -246,8 +278,8 @@ public static class Wlan
             return null;
         }
         return type == "networkKey" && key.Length == 64
-            ? new Network(ssid, bssid, channel, security, null, key, false)
-            : new Network(ssid, bssid, channel, security, key, null, false);
+            ? new Network(ssid, bssid, channel, security, null, key, false, reconnectProfile)
+            : new Network(ssid, bssid, channel, security, key, null, false, reconnectProfile);
     }
 
     /// <summary>Writes the radio's --sta-config file, readable by SYSTEM and Administrators only.</summary>
@@ -259,8 +291,8 @@ public static class Wlan
         var path = Path.Combine(dir, "sta.conf");
         ServiceConfig.RejectReparsePoint(path);
         var lines = new List<string> { $"ssid={n.Ssid}", $"bssid={n.Bssid}", $"channel={n.Channel}" };
-        // nekodrop's own TAP adapter (installer: DHCP on), never another VPN's.
-        lines.Add("tap=nekodrop");
+        // Airdraft's own TAP adapter (installer: DHCP on), never another VPN's.
+        lines.Add("tap=Airdraft");
         if (n.Open) lines.Add("open=1");
         else if (n.PskHex is not null) lines.Add($"psk={n.PskHex}");
         else lines.Add($"passphrase={n.Passphrase}");
@@ -278,6 +310,19 @@ public static class Wlan
         return path;
     }
 
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    struct ConnectParameters
+    {
+        public int Mode;
+        [MarshalAs(UnmanagedType.LPWStr)] public string Profile;
+        public IntPtr Ssid;
+        public IntPtr DesiredBssids;
+        public int BssType;
+        public uint Flags;
+    }
+
+    [DllImport("wlanapi.dll")] static extern uint WlanConnect(IntPtr handle, ref Guid iface,
+        in ConnectParameters parameters, IntPtr reserved);
     [DllImport("wlanapi.dll")] static extern int WlanOpenHandle(uint version, IntPtr reserved, out uint negotiated, out IntPtr handle);
     [DllImport("wlanapi.dll")] static extern int WlanCloseHandle(IntPtr handle, IntPtr reserved);
     [DllImport("wlanapi.dll")] static extern int WlanEnumInterfaces(IntPtr handle, IntPtr reserved, out IntPtr list);

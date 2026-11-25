@@ -113,7 +113,7 @@ NTSTATUS NekoHwPrepare(NEKO_DEVICE *dev, WDFCMRESLIST translated) {
            dev->Address[2], dev->Address[3], dev->Address[4], dev->Address[5]);
 
   NekoIrqEnable(dev);
-  st = NekoSetCapabilities(dev);
+  st = NekoSetCapabilities(dev, info);
   if (!NT_SUCCESS(st)) return st;
 
   dev->Stop = 0;

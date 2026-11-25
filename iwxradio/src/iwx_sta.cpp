@@ -24,6 +24,7 @@ namespace {
 constexpr unsigned kStaMac = 1;
 constexpr unsigned kStaPhy = 1;
 constexpr unsigned kStaBinding = 1;
+constexpr uint8_t kStaMulticastPort = 1; // Port 0 belongs to the AWDL listener.
 
 /* EDCA defaults for a station (802.11-2016 table 9-137), per firmware AC. */
 struct Edca {
@@ -77,7 +78,7 @@ int IwxDevice::sta_mac_cmd(uint32_t action, bool assoc) {
 }
 
 bool IwxDevice::sta_join(const StaParams &p) {
-  if (!_queue_enabled) return false; /* the listener comes first */
+  if (!_queue_enabled && !(_listener_failed && healthy() && _fw.has_capa(IWX_UCODE_TLV_CAPA_DYNAMIC_QUOTA))) return false;
   sta_leave();
   _sta = p;
   /* Always its own PHY and binding: sharing the listener's binding left
@@ -173,14 +174,14 @@ bool IwxDevice::sta_associated(uint16_t aid, uint8_t dtim_period) {
   if (!nic_lock()) return false;
   int err = 0;
   if (!_sta_shared_binding && _sta.width > 20) {
-    err = phy_cmd(kStaPhy, _sta.channel, _sta.width, IWX_FW_CTXT_ACTION_MODIFY);
-    if (err) {
+    err = phy_cmd(kStaPhy, _sta.channel, _sta.width, IWX_FW_CTXT_ACTION_MODIFY, _sta.center_channel);
+    if (err && healthy()) {
       _log("station: wide PHY refused, staying at 20 MHz");
       _sta.width = 20;
       err = 0;
     }
   }
-  err = sta_mac_cmd(IWX_FW_CTXT_ACTION_MODIFY, true);
+  if (!err) err = sta_mac_cmd(IWX_FW_CTXT_ACTION_MODIFY, true);
   if (!err) {
     /* HT/VHT now that the AP agreed (iwx_add_sta_cmd update). */
     iwx_add_sta_cmd cmd{};
@@ -203,6 +204,18 @@ bool IwxDevice::sta_associated(uint16_t aid, uint8_t dtim_period) {
     uint32_t status = IWX_ADD_STA_SUCCESS;
     err = send_cmd_status(IWX_ADD_STA, &cmd, sizeof(cmd), &status);
     if (!err && (status & IWX_ADD_STA_STATUS_MASK) != IWX_ADD_STA_SUCCESS) err = EIO;
+  }
+  if (!err) {
+    /* Router advertisements and neighbor discovery use the AP's group frames. */
+    /* The firmware struct ends in a zero-size address array. */
+    alignas(4) uint8_t buf[roundup(sizeof(iwx_mcast_filter_cmd), 4)] = {};
+    auto *mc = reinterpret_cast<iwx_mcast_filter_cmd *>(buf);
+    mc->filter_own = 1;
+    mc->port_id = kStaMulticastPort;
+    mc->pass_all = 1;
+    std::memcpy(mc->bssid, _sta.bssid, sizeof(mc->bssid));
+    err = send_cmd(IWX_MCAST_FILTER_CMD, buf, sizeof(buf), false, nullptr);
+    if (err) _log("station: multicast filter refused (" + std::to_string(err) + ")");
   }
   if (!err) {
     iwx_mac_power_cmd pm{};

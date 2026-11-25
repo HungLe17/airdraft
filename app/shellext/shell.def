@@ -1,4 +1,0 @@
-LIBRARY nekodrop-shell
-EXPORTS
-    DllGetClassObject PRIVATE
-    DllCanUnloadNow PRIVATE

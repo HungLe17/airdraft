@@ -1,21 +1,21 @@
 #Requires -RunAsAdministrator
-# nekodrop's own TAP-Windows adapter, named "nekodrop", on DHCP. In concurrent
+# Airdraft's own TAP-Windows adapter, named "Airdraft", on DHCP. In concurrent
 # mode the radio bridges the Wi-Fi station to it, so Windows gets its address
 # from the router through it. Never another program's TAP adapter: those may
 # carry static addresses (a VPN's), which is what broke the first test.
 param([string]$TapSetup = (Join-Path $PSScriptRoot 'tap-windows.exe'))
 $ErrorActionPreference = 'Stop'
-$name = 'nekodrop'
+$name = 'Airdraft'
 $tapinstall = Join-Path $env:ProgramFiles 'TAP-Windows\bin\tapinstall.exe'
 $tapinf = Join-Path $env:ProgramFiles 'TAP-Windows\driver\OemVista.inf'
 
 function TapAdapters { @(Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
                          Where-Object { $_.InterfaceDescription -like 'TAP-Windows Adapter V9*' -and $_.Status -ne 'Not Present' }) }
 
-# A previous install or Windows device removal can leave a phantom 'nekodrop'
+# A previous install or Windows device removal can leave a phantom 'Airdraft'
 # adapter with status "Not Present": -IncludeHidden matched it, skipped creating
 # a live adapter, and timed out waiting for IPv4 (issue #20). Remove any phantom
-# copy first so a fresh adapter can take the name 'nekodrop'.
+# copy first so a fresh adapter can take the name 'Airdraft'.
 foreach ($ghost in @(Get-NetAdapter -Name $name -IncludeHidden -ErrorAction SilentlyContinue | Where-Object Status -eq 'Not Present')) {
   "removing stale '$name' adapter ($($ghost.PnPDeviceID))"
   if ($ghost.PnPDeviceID) {
@@ -25,6 +25,9 @@ foreach ($ghost in @(Get-NetAdapter -Name $name -IncludeHidden -ErrorAction Sile
 
 $existing = Get-NetAdapter -Name $name -IncludeHidden -ErrorAction SilentlyContinue |
             Where-Object Status -ne 'Not Present' | Select-Object -First 1
+if ($existing -and $existing.InterfaceDescription -notlike 'TAP-Windows Adapter V9*') {
+  throw "The network adapter name '$name' is already in use."
+}
 if (-not $existing) {
   $before = TapAdapters | ForEach-Object InterfaceGuid
   if (-not ((Test-Path $tapinstall) -and (Test-Path $tapinf))) {

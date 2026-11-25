@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "awdl_policy.h"
 #include "iwxreg.h"
 
 namespace {
@@ -207,7 +208,7 @@ bool IwxDevice::identify(std::string &error) {
   _log(_card.name + (_card.ax210 ? " (AX210 family" : " (22000 family") +
        (_integrated ? ", integrated)" : ", discrete)") + ", firmware " + _fw_name +
        (_card.pnvm.empty() ? "" : " + " + _card.pnvm) +
-       (_card.tested ? "" : "; this card has not been tested with nekodrop"));
+       (_card.tested ? "" : "; this card has not been tested with Airdraft"));
   return true;
 }
 
@@ -975,9 +976,11 @@ void IwxDevice::stop() {
     mask_interrupts();
     prepare_card_hw();
   }
+  _fw_sections.clear();
   _proxy.set_close_ops({});
   _open = false;
   _phy_added = _mac_added = _binding_added = _sta_added = _queue_enabled = false;
+  _listener_failed = false;
   _ba_station = _agg_queue_enabled = _agg_active = false;
 }
 
@@ -1059,9 +1062,14 @@ int IwxDevice::send_cmd(uint32_t id, const void *data, size_t len, bool want_res
   const bool answered = wait_for([&] { return !slot.pending; }, timeout_ms);
   _cmd_depth--;
   if (!answered) {
-    _log("firmware command " + hex(id) + cmd_name(id) + " timed out");
     slot.pending = false;
-    return _fw_error ? EIO : ETIMEDOUT;
+    if (_fw_error || _proxy.failed()) return EIO;
+    _log("firmware command " + hex(id) + cmd_name(id) + " timed out");
+    check_health();
+    // The firmware may have applied the command even though it did not reply.
+    // Further commands cannot safely use the MAC or PHY state we expected.
+    _fw_error = true;
+    return ETIMEDOUT;
   }
   if (want_resp) {
     if (slot.resp.empty()) return EIO; /* failed, or the response was too long */
@@ -1196,6 +1204,7 @@ bool IwxDevice::answer_country_notice(std::string *got) {
 }
 
 bool IwxDevice::set_promiscuous(bool on) {
+  if (_listener_failed) return false;
   if (on == _promisc) return true;
   _promisc = on;
   if (!_mac_added) return true;
@@ -1208,7 +1217,7 @@ bool IwxDevice::set_promiscuous(bool on) {
 
 bool IwxDevice::add_rx_ba(const uint8_t peer[6], unsigned tid, uint16_t ssn, uint16_t window,
                           uint8_t token) {
-  if (tid >= 8 || !_mac_added) return false;
+  if (tid >= 8 || !_mac_added || _listener_failed) return false;
   if (!nic_lock()) return false;
   constexpr uint8_t kBaStation = 3; /* ForbiddenItlwm's kAwdlBaStationId */
   int err = 0;
@@ -1475,6 +1484,7 @@ void IwxDevice::handle_ba_notif(const uint8_t *payload, size_t len) {
 }
 
 bool IwxDevice::remove_rx_ba(unsigned tid) {
+  if (_listener_failed) return false;
   if (tid >= 8 || !((_ba_tids >> tid) & 1)) return true;
   if (!nic_lock()) return false;
   iwx_add_sta_cmd cmd{};
@@ -1514,15 +1524,19 @@ bool IwxDevice::set_country(const std::string &alpha2) {
 
 int IwxDevice::phy_ctxt_cmd(uint32_t action) { return phy_cmd(0, _channel, _width, action); }
 
-int IwxDevice::phy_cmd(unsigned phy_id, uint8_t channel, unsigned width_mhz, uint32_t action) {
+int IwxDevice::phy_cmd(unsigned phy_id, uint8_t channel, unsigned width_mhz, uint32_t action, uint8_t center_channel) {
   const bool is_2ghz = channel <= 14;
   const uint8_t width = (width_mhz >= 80 && !is_2ghz) ? IWX_PHY_VHT_CHANNEL_MODE80
                         : (width_mhz >= 40)            ? IWX_PHY_VHT_CHANNEL_MODE40
                                                     : IWX_PHY_VHT_CHANNEL_MODE20;
-  /* The control channel's place inside the 40/80 MHz block, as Apple
-   * devices use 149-161 and 36-48 (ForbiddenItlwm's iwx_get_ctrl_pos). */
+  /* The station takes its center channel from the AP. The listener uses its
+   * own fixed schedule (ForbiddenItlwm's iwx_get_ctrl_pos). */
   uint8_t pos = IWX_PHY_VHT_CTRL_POS_1_BELOW;
-  if (width == IWX_PHY_VHT_CHANNEL_MODE80) {
+  if (center_channel != 0 && width != IWX_PHY_VHT_CHANNEL_MODE20) {
+    const int advertised = iwx_phy_ctrl_pos(channel, center_channel, width_mhz);
+    if (advertised < 0) return EINVAL;
+    pos = static_cast<uint8_t>(advertised);
+  } else if (width == IWX_PHY_VHT_CHANNEL_MODE80) {
     switch (channel) {
     case 36: case 149: pos = IWX_PHY_VHT_CTRL_POS_2_BELOW; break;
     case 40: case 153: pos = IWX_PHY_VHT_CTRL_POS_1_BELOW; break;
@@ -1704,6 +1718,10 @@ int IwxDevice::enable_queue(TxRing &ring, uint8_t sta_id, uint8_t tid) {
 }
 
 bool IwxDevice::start_monitor(uint8_t channel, unsigned width_mhz, const uint8_t address[6]) {
+  return configure_monitor(channel, width_mhz, address, true);
+}
+
+bool IwxDevice::configure_monitor(uint8_t channel, unsigned width_mhz, const uint8_t address[6], bool initialize_shared) {
   _channel = channel;
   _width = width_mhz;
   std::memcpy(_address.data(), address, 6);
@@ -1738,7 +1756,7 @@ bool IwxDevice::start_monitor(uint8_t channel, unsigned width_mhz, const uint8_t
     err = mac_ctxt_cmd(IWX_FW_CTXT_ACTION_MODIFY);
     if (err) _log("MAC context modify failed (" + std::to_string(err) + ")");
   }
-  if (!err) {
+  if (!err && initialize_shared) {
     iwx_sf_cfg_cmd sf{};
     sf.state = htole32(IWX_SF_FULL_ON);
     sf.watermark[IWX_SF_LONG_DELAY_ON] = htole32(IWX_SF_W_MARK_SCAN);
@@ -1761,6 +1779,7 @@ bool IwxDevice::start_monitor(uint8_t channel, unsigned width_mhz, const uint8_t
     alignas(4) uint8_t buf[roundup(sizeof(iwx_mcast_filter_cmd), 4)] = {};
     auto *mc = reinterpret_cast<iwx_mcast_filter_cmd *>(buf);
     mc->filter_own = 1;
+    mc->port_id = 0; /* the station uses port 1 */
     mc->pass_all = 1;
     std::memset(mc->bssid, 0xff, sizeof(mc->bssid));
     err = send_cmd(IWX_MCAST_FILTER_CMD, buf, sizeof(buf), false, nullptr);
@@ -1790,21 +1809,19 @@ bool IwxDevice::start_monitor(uint8_t channel, unsigned width_mhz, const uint8_t
 }
 
 bool IwxDevice::set_channel(uint8_t channel, unsigned width_mhz) {
-  if (!_phy_added) return false;
+  if (!_phy_added || _listener_failed || !healthy()) return false;
   if (channel == _channel && width_mhz == _width) return true;
+  /* Changing band under a live binding is what itlwm refuses (it asserts the
+   * firmware on CDB parts); a modify within one band is safe. */
+  if ((_channel <= 14) != (channel <= 14)) {
+    _log("channel change across bands is not supported live");
+    return false;
+  }
+  if (!nic_lock()) return false;
   const uint8_t old_channel = _channel;
   const unsigned old_width = _width;
   _channel = channel;
   _width = width_mhz;
-  /* Changing band under a live binding is what itlwm refuses (it asserts the
-   * firmware on CDB parts); a modify within one band is safe. */
-  if ((old_channel <= 14) != (channel <= 14)) {
-    _log("channel change across bands is not supported live");
-    _channel = old_channel;
-    _width = old_width;
-    return false;
-  }
-  if (!nic_lock()) return false;
   const int err = phy_ctxt_cmd(IWX_FW_CTXT_ACTION_MODIFY);
   nic_unlock();
   if (err) {
@@ -1817,7 +1834,56 @@ bool IwxDevice::set_channel(uint8_t channel, unsigned width_mhz) {
   return true;
 }
 
+int IwxDevice::remove_listener_station(uint8_t station_id, bool flush) {
+  if (flush) {
+    iwx_tx_path_flush_cmd cmd{};
+    cmd.sta_id = htole32(station_id);
+    cmd.tid_mask = htole16(0xffff);
+    if (const int err = send_cmd(IWX_TXPATH_FLUSH, &cmd, sizeof(cmd), false, nullptr)) return err;
+  }
+  iwx_rm_sta_cmd remove{};
+  remove.sta_id = station_id;
+  return send_cmd(IWX_REMOVE_STA, &remove, sizeof(remove), false, nullptr);
+}
+
+bool IwxDevice::retune_listener(uint8_t channel, unsigned width_mhz) {
+  if (!listener_healthy() || _scan_running || !awdl::fixed_schedule_channel(channel) ||
+      (width_mhz != 20 && (width_mhz != 80 || !awdl::block80_first(channel)))) return false;
+  if ((_channel <= 14) == (channel <= 14)) return set_channel(channel, width_mhz);
+  // Dynamic quotas let the listener move without reprogramming airtime for
+  // the Windows station, which must have its own PHY and binding.
+  if (_opt.mac_type != MacType::Listener || _sta_shared_binding || !_fw.has_capa(IWX_UCODE_TLV_CAPA_DYNAMIC_QUOTA) ||
+      !nic_lock()) return false;
+
+  const auto address = _address;
+  _queue_enabled = false;
+  int err = 0;
+  if (_ba_station) err = remove_listener_station(3, _agg_queue_enabled);
+  if (!err && _sta_added) err = remove_listener_station(IWX_MONITOR_STA_ID, true);
+  if (!err && _binding_added) err = binding_cmd(IWX_FW_CTXT_ACTION_REMOVE);
+  if (!err && _mac_added) err = mac_ctxt_cmd(IWX_FW_CTXT_ACTION_REMOVE);
+  if (!err && _phy_added) err = phy_ctxt_cmd(IWX_FW_CTXT_ACTION_REMOVE);
+  nic_unlock();
+
+  if (!err) {
+    // Firmware released the listener queues. Keep the DMA memory for reuse.
+    _dataq.queued = _aggq.queued = 0;
+    _ba_station = _agg_queue_enabled = _agg_active = false;
+    _ba_tids = 0;
+    _ba_epoch++;
+    _phy_added = _mac_added = _binding_added = _sta_added = false;
+    if (configure_monitor(channel, width_mhz, address.data(), false)) return true;
+  }
+  // Some listener state may still belong to firmware. Leave the station
+  // alone and disallow another listener operation in this firmware session.
+  _listener_failed = true;
+  _queue_enabled = false;
+  _log("listener could not change bands; AWDL is unavailable in this firmware session");
+  return false;
+}
+
 bool IwxDevice::set_address(const uint8_t address[6]) {
+  if (_listener_failed) return false;
   if (std::memcmp(address, _address.data(), 6) == 0) return true;
   std::memcpy(_address.data(), address, 6);
   if (!_mac_added) return true;

@@ -1,0 +1,57 @@
+#include <windows.h>
+#include "resource.h"
+
+1 ICON "../assets/Airdraft.ico"
+
+IDD_PREFERENCES DIALOGEX 0, 0, 326, 162
+STYLE DS_MODALFRAME | DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Airdraft Settings"
+FONT 10, "Segoe UI"
+BEGIN
+    GROUPBOX        "AirDrop", -1, 10, 8, 306, 84
+    LTEXT           "Device &name", -1, 20, 23, 78, 10
+    EDITTEXT        IDC_DEVICE_NAME, 20, 35, 286, 14, ES_AUTOHSCROLL | WS_TABSTOP
+    LTEXT           "Save incoming files to", -1, 20, 56, 133, 10
+    EDITTEXT        IDC_DOWNLOAD_FOLDER, 20, 68, 224, 14, ES_AUTOHSCROLL | ES_READONLY | WS_TABSTOP
+    PUSHBUTTON      "&Browse...", IDC_BROWSE_FOLDER, 252, 67, 54, 16
+    GROUPBOX        "Nearby devices and transfers", -1, 10, 98, 306, 35
+    AUTOCHECKBOX   "Show devices still &connecting", IDC_SHOW_PENDING, 20, 113, 137, 12
+    AUTOCHECKBOX   "Show transfer no&tifications", IDC_TRANSFER_NOTICES, 166, 113, 140, 12
+    PUSHBUTTON      "Restore &defaults", IDC_RESTORE_DEFAULTS, 10, 139, 83, 16
+    DEFPUSHBUTTON   "&Save", IDOK, 202, 139, 54, 16
+    PUSHBUTTON      "Cancel", IDCANCEL, 262, 139, 54, 16
+END
+
+IDD_FILE_REVIEW DIALOGEX 0, 0, 366, 171
+STYLE DS_MODALFRAME | DS_SETFONT | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Files to send"
+FONT 10, "Segoe UI"
+BEGIN
+    LTEXT           "Select files to remove from the queue.", -1, 10, 9, 246, 11
+    LISTBOX         IDC_QUEUED_FILES, 10, 22, 346, 115, WS_TABSTOP | WS_VSCROLL | WS_HSCROLL | LBS_NOINTEGRALHEIGHT | LBS_EXTENDEDSEL | LBS_NOTIFY
+    PUSHBUTTON      "Remove from &queue", IDC_REMOVE_QUEUED, 10, 145, 104, 16, WS_DISABLED
+    DEFPUSHBUTTON   "Close", IDCANCEL, 300, 145, 56, 16
+END
+
+1 VERSIONINFO
+ FILEVERSION 0,1,6,0
+ PRODUCTVERSION 0,1,6,0
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE VFT_APP
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "CompanyName", "Airdraft"
+   VALUE "FileDescription", "Airdraft for Windows"
+   VALUE "FileVersion", "0.1.6"
+   VALUE "ProductName", "Airdraft"
+   VALUE "ProductVersion", "0.1.6 Developer Preview"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x0409, 1200
+ END
+END

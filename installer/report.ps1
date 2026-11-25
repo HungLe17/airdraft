@@ -1,12 +1,12 @@
-﻿# nekodrop diagnostic report: everything a bug report needs, in one file.
-# Start menu -> "nekodrop - diagnostic report", the tray menu, or run this.
+﻿# Airdraft diagnostic report: everything a bug report needs, in one file.
+# Start menu -> "Airdraft - diagnostic report", the tray menu, or run this.
 # Needs administrator rights (the service's logs and the driver state are
 # readable by administrators only); it asks for them itself.
 #
 # Writes two files to the Desktop:
-#   nekodrop-report-<time>.md   summary, bring-up checklist, system, card,
+#   Airdraft-report-<time>.md   summary, bring-up checklist, system, card,
 #                               network, key log lines (paste into an issue)
-#   nekodrop-logs-<time>.txt    the full logs (attach to the issue)
+#   Airdraft-logs-<time>.txt    the full logs (attach to the issue)
 # SSIDs, MAC addresses, private IP addresses, the user name and the computer
 # name are replaced by placeholders. Nothing is sent anywhere.
 #
@@ -23,7 +23,7 @@ $ErrorActionPreference = 'Continue'
 Set-StrictMode -Off
 
 # ------------------------------------------------ Wi-Fi card classification
-# What a wireless card is and why nekodrop does or does not run on it, from its
+# What a wireless card is and why Airdraft does or does not run on it, from its
 # PCI (or USB) ID alone. Without this a report from a PC with a Realtek,
 # MediaTek or newer Intel card said only "no supported Intel card found", which
 # did not tell an unlisted device ID from a broken driver (#16). Pure data, so
@@ -31,7 +31,7 @@ Set-StrictMode -Off
 #
 # The supported IDs are iwxradio/src/cards.h's kDeviceIds, the register
 # proxy's INF and install.ps1's check: keep them in step.
-$SupportedIntelIds = @('43F0', 'A0F0', '02F0', '06F0', '34F0', '3DF0', '4DF0', '2723', '2725', '7A70', '7AF0', '51F0', '51F1', '54F0', '7F70')
+$KnownIntelIds = @('43F0', 'A0F0', '02F0', '06F0', '34F0', '3DF0', '4DF0', '2723', '2725', '7A70', '7AF0', '51F0', '51F1', '54F0', '7F70')
 # Known Wi-Fi chips, 'vendor:device' -> kind, name. Used to name the chip and to
 # find a card that has no driver (it is then no network adapter). Never used to
 # call a device wireless by its vendor alone: Intel and Realtek make Ethernet
@@ -49,13 +49,12 @@ $WifiChips = @{
   '8086:E440' = @('intel-be', 'Intel Wi-Fi 7 (CNVi)')
   '8086:E340' = @('intel-be', 'Intel Wi-Fi 7 (CNVi)')
   '8086:D340' = @('intel-be', 'Intel Wi-Fi 7 (CNVi)')
-  # Realtek (Linux rtw88/rtw89 device IDs). RTL8852CE is natively supported
-  # via nekodrop's built-in devourer backend (on-demand AirDrop).
-  '10EC:C852' = @('supported-rtl', 'Realtek RTL8852CE')
+  # Known Realtek hardware from Linux rtw88/rtw89.
+  '10EC:C852' = @('rtl', 'Realtek RTL8852CE')
   '10EC:8852' = @('rtl', 'Realtek RTL8852AE')
   '10EC:A85A' = @('rtl', 'Realtek RTL8852AE')
-  '10EC:B852' = @('rtl', 'Realtek RTL8852BE')
-  '10EC:B85B' = @('rtl', 'Realtek RTL8852BE')
+  '10EC:B852' = @('rtl-be-experimental', 'Realtek RTL8852BE')
+  '10EC:B85B' = @('rtl-be-experimental', 'Realtek RTL8852BE')
   '10EC:B851' = @('rtl', 'Realtek RTL8851BE')
   '10EC:8922' = @('rtl', 'Realtek RTL8922AE')
   '10EC:C822' = @('rtl', 'Realtek RTL8822CE')
@@ -95,16 +94,17 @@ $WifiChips = @{
 }
 # kind -> what the report says, and a hint for the reader (may be empty).
 $WifiKinds = @{
-  'supported'     = @('supported by nekodrop', '')
-  'supported-rtl' = @('supported by nekodrop (on-demand AirDrop, built-in RTL8852CE backend)', 'Windows keeps Wi-Fi normally; nekodrop takes the card only during AirDrop transfers.')
-  'intel-fw'      = @('not supported: its firmware is not shipped upstream', 'nekodrop runs the Intel cards whose firmware ForbiddenItlwm ships (API 68); this one has none there.')
-  'intel-be'      = @('not supported: Intel Wi-Fi 7, no upstream driver', 'ForbiddenItlwm, which nekodrop ports, has no driver for Wi-Fi 7 cards yet.')
-  'intel-other'   = @('not supported: an Intel device ID nekodrop does not know', 'Please post this report in an issue: if upstream ships firmware for this card, its ID can be added.')
-  'rtl'           = @('not supported: Realtek', 'Among Realtek chips, nekodrop currently has built-in support for RTL8852CE (10EC:C852) only.')
+  'supported'     = @('supported by the AX210 developer preview', '')
+  'intel-preview' = @('outside the AX210 developer preview', 'The preview requires Intel AX210 (8086:2725).')
+  'intel-fw'      = @('not supported: its firmware is not shipped upstream', 'Airdraft runs the Intel cards whose firmware ForbiddenItlwm ships (API 68); this one has none there.')
+  'intel-be'      = @('not supported: Intel Wi-Fi 7, no upstream driver', 'ForbiddenItlwm, which Airdraft ports, has no driver for Wi-Fi 7 cards yet.')
+  'intel-other'   = @('not supported: an Intel device ID Airdraft does not know', 'Please post this report in an issue: if upstream ships firmware for this card, its ID can be added.')
+  'rtl'           = @('outside the AX210 developer preview', '')
+  'rtl-be-experimental' = @('experimental development target', 'The standard preview binds Intel AX210 only. The RTL8852BE radio requires a separate development build and hardware qualification.')
   'mtk'           = @('not supported: MediaTek', 'No user-mode Windows driver exists for MediaTek Wi-Fi yet.')
   'qcom'          = @('not supported: Qualcomm', 'No user-mode Windows driver exists for Qualcomm Wi-Fi yet.')
   'bcm'           = @('not supported: Broadcom', 'There is no open Windows driver path for Broadcom Wi-Fi.')
-  'usb'           = @('not supported: USB adapter', 'nekodrop drives PCIe cards only.')
+  'usb'           = @('not supported: USB adapter', 'Airdraft drives PCIe cards only.')
   'other'         = @('not supported: unrecognized wireless adapter', '')
 }
 $WifiVendors = @{ '8086' = 'Intel'; '10EC' = 'Realtek'; '14C3' = 'MediaTek'; '17CB' = 'Qualcomm'; '168C' = 'Qualcomm Atheros'; '14E4' = 'Broadcom'
@@ -121,7 +121,8 @@ function Classify-WifiCard([string]$InstanceId, [string]$FriendlyName = '') {
   if ($bus -eq 'USB') { $kind = 'usb' }
   elseif ($bus -eq 'PCI' -and $vendor) {
     $key = $vendor + ':' + $device
-    if ($vendor -eq '8086' -and $SupportedIntelIds -contains $device) { $kind = 'supported'; $chip = 'Intel Wi-Fi 6/6E' }
+    if ($key -eq '8086:2725') { $kind = 'supported'; $chip = 'Intel AX210' }
+    elseif ($vendor -eq '8086' -and $KnownIntelIds -contains $device) { $kind = 'intel-preview'; $chip = 'Intel Wi-Fi 6/6E' }
     elseif ($WifiChips.ContainsKey($key)) { $kind = $WifiChips[$key][0]; $chip = $WifiChips[$key][1] }
     else {
       # Only reached for a device already known to be wireless (by its medium
@@ -131,7 +132,7 @@ function Classify-WifiCard([string]$InstanceId, [string]$FriendlyName = '') {
     }
   }
   $vendorName = if ($WifiVendors.ContainsKey($vendor)) { $WifiVendors[$vendor] } elseif ($vendor) { "vendor $vendor" } else { 'unknown vendor' }
-  if (-not $chip) { $chip = "$vendorName $device (not in nekodrop's table)" }
+  if (-not $chip) { $chip = "$vendorName $device (not in Airdraft's table)" }
   return [pscustomobject]@{
     Bus = $bus; Vendor = $vendorName; VendorId = $vendor; DeviceId = $device
     HardwareId = $(if ($parts.Count -gt 1) { $parts[1] } else { $id })
@@ -142,7 +143,7 @@ function Classify-WifiCard([string]$InstanceId, [string]$FriendlyName = '') {
 function Test-KnownWifiId([string]$InstanceId) {
   $c = Classify-WifiCard $InstanceId
   if ($c.Bus -ne 'PCI') { return $false }
-  return ($c.Kind -eq 'supported' -or $WifiChips.ContainsKey($c.VendorId + ':' + $c.DeviceId))
+  return ($c.Kind -in 'supported', 'intel-preview' -or $WifiChips.ContainsKey($c.VendorId + ':' + $c.DeviceId))
 }
 
 # ------------------------------------------------------- discovery timing
@@ -220,16 +221,17 @@ function Get-DiscoverySummary($attemptLines, $engineLines) {
 if ($SelfTest) {
   $fail = @()
   $cases = @(
-    @('PCI\VEN_8086&DEV_43F0&SUBSYS_00748086&REV_00\3&11583659&0&A3', 'supported', 'Intel Wi-Fi 6/6E'),
-    @('PCI\VEN_8086&DEV_2725&SUBSYS_00248086&REV_1A\4&2A1B3C4D&0&00E0', 'supported', 'Intel Wi-Fi 6/6E'),
+    @('PCI\VEN_8086&DEV_43F0&SUBSYS_00748086&REV_00\3&11583659&0&A3', 'intel-preview', 'Intel Wi-Fi 6/6E'),
+    @('PCI\VEN_8086&DEV_2725&SUBSYS_00248086&REV_1A\4&2A1B3C4D&0&00E0', 'supported', 'Intel AX210'),
     @('PCI\VEN_8086&DEV_7E40&SUBSYS_00908086&REV_20\3&11583659&0&A3', 'intel-fw', 'Intel Ma (Meteor Lake CNVi)'),
     @('PCI\VEN_8086&DEV_2726&SUBSYS_00248086', 'intel-fw', 'Intel SnJ'),
     @('PCI\VEN_8086&DEV_272B&SUBSYS_00F48086&REV_1A\4&1', 'intel-be', 'Intel BE200 (Wi-Fi 7)'),
-    @('PCI\VEN_8086&DEV_1234&SUBSYS_00008086\4&1', 'intel-other', 'Intel 1234 (not in nekodrop''s table)'),
-    @('PCI\VEN_10EC&DEV_C852&SUBSYS_C85210EC&REV_00\4&1&0&00E8', 'supported-rtl', 'Realtek RTL8852CE'),
-    @('pci\ven_10ec&dev_c852&subsys_c85210ec', 'supported-rtl', 'Realtek RTL8852CE'),
-    @('PCI\VEN_10EC&DEV_B852&SUBSYS_B85217AA\4&1', 'rtl', 'Realtek RTL8852BE'),
-    @('PCI\VEN_10EC&DEV_ABCD&SUBSYS_000010EC', 'rtl', 'Realtek ABCD (not in nekodrop''s table)'),
+    @('PCI\VEN_8086&DEV_1234&SUBSYS_00008086\4&1', 'intel-other', 'Intel 1234 (not in Airdraft''s table)'),
+    @('PCI\VEN_10EC&DEV_C852&SUBSYS_C85210EC&REV_00\4&1&0&00E8', 'rtl', 'Realtek RTL8852CE'),
+    @('pci\ven_10ec&dev_c852&subsys_c85210ec', 'rtl', 'Realtek RTL8852CE'),
+    @('PCI\VEN_10EC&DEV_B852&SUBSYS_B85217AA\4&1', 'rtl-be-experimental', 'Realtek RTL8852BE'),
+    @('PCI\VEN_10EC&DEV_B85B&SUBSYS_B85B17AA\4&1', 'rtl-be-experimental', 'Realtek RTL8852BE'),
+    @('PCI\VEN_10EC&DEV_ABCD&SUBSYS_000010EC', 'rtl', 'Realtek ABCD (not in Airdraft''s table)'),
     @('PCI\VEN_14C3&DEV_7922&SUBSYS_7922103C\4&1', 'mtk', 'MediaTek MT7922'),
     @('PCI\VEN_14C3&DEV_0616&SUBSYS_E0CD1A3B\4&1', 'mtk', 'MediaTek MT7922 (AMD RZ616)'),
     @('PCI\VEN_14C3&DEV_7927&SUBSYS_792714C3\4&1', 'mtk', 'MediaTek MT7927 (Wi-Fi 7)'),
@@ -237,8 +239,8 @@ if ($SelfTest) {
     @('PCI\VEN_17CB&DEV_1103&SUBSYS_010817CB\4&1', 'qcom', 'Qualcomm WCN6855 (FastConnect 6800/6900)'),
     @('PCI\VEN_168C&DEV_003E&SUBSYS_3212144F\4&1', 'qcom', 'Qualcomm Atheros QCA6174'),
     @('PCI\VEN_14E4&DEV_43A0&SUBSYS_0000106B\4&1', 'bcm', 'Broadcom BCM4360'),
-    @('USB\VID_0BDA&PID_8812\00E04C000001', 'usb', 'Realtek 8812 (not in nekodrop''s table)'),
-    @('PCI\VEN_1AE0&DEV_1234&SUBSYS_00001AE0\4&1', 'other', 'vendor 1AE0 1234 (not in nekodrop''s table)')
+    @('USB\VID_0BDA&PID_8812\00E04C000001', 'usb', 'Realtek 8812 (not in Airdraft''s table)'),
+    @('PCI\VEN_1AE0&DEV_1234&SUBSYS_00001AE0\4&1', 'other', 'vendor 1AE0 1234 (not in Airdraft''s table)')
   )
   foreach ($c in $cases) {
     $r = Classify-WifiCard $c[0]
@@ -246,10 +248,11 @@ if ($SelfTest) {
   }
   if ((Classify-WifiCard 'PCI\VEN_10EC&DEV_C852&SUBSYS_1\4&1' 'Realtek 8852CE').HardwareId -ne 'VEN_10EC&DEV_C852&SUBSYS_1') { $fail += 'hardware ID not split from the instance path' }
   if ((Classify-WifiCard 'PCI\VEN_10EC&DEV_C852').Family -ne 'Realtek RTL8852CE') { $fail += 'Family alias mismatch' }
-  $rtlCard = Classify-WifiCard 'PCI\VEN_10EC&DEV_C852&SUBSYS_C85210EC&REV_00\4&1&0&00E8'
-  if ($rtlCard.Status -notmatch 'on-demand' -or $rtlCard.Status -notmatch 'RTL8852CE') { $fail += "10EC:C852 status missing on-demand/RTL8852CE: $($rtlCard.Status)" }
-  foreach ($d in $SupportedIntelIds) {
-    if ((Classify-WifiCard "PCI\VEN_8086&DEV_$d").Kind -ne 'supported') { $fail += "8086:$d not supported" }
+  $rtlCard = Classify-WifiCard 'PCI\VEN_10EC&DEV_B852&SUBSYS_B85217AA'
+  if ($rtlCard.Status -notmatch 'experimental') { $fail += "10EC:B852 status missing experimental: $($rtlCard.Status)" }
+  foreach ($d in $KnownIntelIds) {
+    $kind = if ($d -eq '2725') { 'supported' } else { 'intel-preview' }
+    if ((Classify-WifiCard "PCI\VEN_8086&DEV_$d").Kind -ne $kind) { $fail += "8086:$d has the wrong preview status" }
   }
   # Ethernet chips must never be taken for Wi-Fi by their ID.
   foreach ($eth in 'PCI\VEN_10EC&DEV_8168', 'PCI\VEN_10EC&DEV_8125', 'PCI\VEN_8086&DEV_15F3', 'PCI\VEN_8086&DEV_15BC', 'PCI\VEN_14E4&DEV_16B1') {
@@ -324,7 +327,7 @@ if (-not $isAdmin) {
              "-UserData `"$env:LOCALAPPDATA`" -UserName `"$env:USERNAME`""
   if ($NoOpen) { $argLine += ' -NoOpen' }
   try { Start-Process powershell.exe -ArgumentList $argLine -Verb RunAs | Out-Null }
-  catch { Write-Host 'nekodrop: the diagnostic report needs administrator rights.' }
+  catch { Write-Host 'Airdraft: the diagnostic report needs administrator rights.' }
   exit
 }
 if (-not $OutDir) { $OutDir = [Environment]::GetFolderPath('Desktop') }
@@ -332,14 +335,14 @@ if (-not $UserData) { $UserData = $env:LOCALAPPDATA }
 if (-not $UserName) { $UserName = $env:USERNAME }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
-$state = Join-Path $env:ProgramData 'nekodrop'
+$state = Join-Path $env:ProgramData 'Airdraft'
 $app = $PSScriptRoot
-# Downloaded on its own (for an older nekodrop): the installed copy's folder.
-if (-not (Test-Path (Join-Path $app 'NekoDropService.exe'))) { $app = Join-Path $env:ProgramFiles 'nekodrop' }
+# Downloaded on its own (for an older Airdraft): the installed copy's folder.
+if (-not (Test-Path (Join-Path $app 'AirdraftRadioService.exe'))) { $app = Join-Path $env:ProgramFiles 'Airdraft' }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmm'
-$reportPath = Join-Path $OutDir "nekodrop-report-$stamp.md"
-$logsPath = Join-Path $OutDir "nekodrop-logs-$stamp.txt"
-Write-Host 'nekodrop: collecting the diagnostic report...'
+$reportPath = Join-Path $OutDir "Airdraft-report-$stamp.md"
+$logsPath = Join-Path $OutDir "Airdraft-logs-$stamp.txt"
+Write-Host 'Airdraft: collecting the diagnostic report...'
 
 # ---------------------------------------------------------------- helpers
 function Read-Tail([string]$path, [int]$n) {
@@ -367,7 +370,7 @@ function Run-Netsh([string[]]$netshArgs) {
 
 # Service log, the rotated copy first (oldest lines first).
 $serviceLog = @(Read-All (Join-Path $state 'service.log.1')) + @(Read-All (Join-Path $state 'service.log'))
-$engineDir = Join-Path $UserData 'nekodrop'
+$engineDir = Join-Path $UserData 'Airdraft'
 $engineLog = @(Read-All (Join-Path $engineDir 'engine.log.old')) + @(Read-All (Join-Path $engineDir 'engine.log'))
 $installLog = Read-All (Join-Path $state 'install.log')
 $restoreLog = Read-All (Join-Path $state 'restore.log')
@@ -384,7 +387,7 @@ foreach ($line in $wlanInterfaces) {
   if ($line -match '^\s*SSID\s*:\s(.+)$') { $ssids.Add($Matches[1].Trim()) }
 }
 foreach ($line in $serviceLog) {
-  foreach ($m in [regex]::Matches($line, '(?:joining|connecting to|chosen in nekodrop|Forget|forget)\s+"([^"]+)"')) { $ssids.Add($m.Groups[1].Value) }
+  foreach ($m in [regex]::Matches($line, '(?:joining|connecting to|chosen in Airdraft|Forget|forget)\s+"([^"]+)"')) { $ssids.Add($m.Groups[1].Value) }
   foreach ($m in [regex]::Matches($line, '^\S+ \S+ Wi-Fi: "([^"]+)"')) { $ssids.Add($m.Groups[1].Value) }
 }
 $ssidList = @($ssids | Where-Object { $_ -and $_.Length -ge 3 } | Sort-Object -Unique | Sort-Object Length -Descending)
@@ -417,16 +420,18 @@ $cv = Try-Get { Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVer
 $cs = Try-Get { Get-CimInstance Win32_ComputerSystem }
 $cpu = Try-Get { (Get-CimInstance Win32_Processor | Select-Object -First 1).Name.Trim() }
 $dg = Try-Get { Get-CimInstance -Namespace root\Microsoft\Windows\DeviceGuard -ClassName Win32_DeviceGuard }
-$svc = Get-Service NekoDropService -ErrorAction SilentlyContinue
-$svcStart = Try-Get { (Get-CimInstance Win32_Service -Filter "Name='NekoDropService'").StartMode }
-$exe = Join-Path $app 'NekoDropService.exe'
+$svc = Get-Service AirdraftRadioService -ErrorAction SilentlyContinue
+$svcStart = Try-Get { (Get-CimInstance Win32_Service -Filter "Name='AirdraftRadioService'").StartMode }
+$exe = Join-Path $app 'AirdraftRadioService.exe'
 $version = Try-Get { (Get-Item $exe).VersionInfo.ProductVersion }
 $config = Try-Get { Get-Content (Join-Path $state 'service.json') -Raw | ConvertFrom-Json }
-$SupportedCardPattern = '^PCI\\(?:VEN_8086&DEV_(' + ($SupportedIntelIds -join '|') + ')|VEN_10EC&DEV_C852)(?=&|\\|$)'
+$experimental = Test-Path -LiteralPath (Join-Path $app 'RTL8852BE.experimental') -PathType Leaf
+$SupportedCardPattern = if ($experimental) { '^PCI\\VEN_10EC&DEV_(?:B852|B85B)(?=&|\\|$)' } else { '^PCI\\VEN_8086&DEV_2725(?=&|\\|$)' }
 # Every present device once: the supported card and the other wireless cards
 # below both come from it.
 $pnpAll = @(Try-Get { Get-PnpDevice -PresentOnly } | Where-Object { $_ })
-$card = $pnpAll | Where-Object { $_.InstanceId -match $SupportedCardPattern } | Select-Object -First 1
+$cardMatches = @($pnpAll | Where-Object { $_.InstanceId -match $SupportedCardPattern })
+$card = if ($cardMatches.Count -eq 1) { $cardMatches[0] }
 # A device property as text ('' when missing); any device, not only $card, so
 # the report can show an unsupported card's driver too.
 function Dev-Prop([string]$instanceId, [string]$key) {
@@ -476,13 +481,13 @@ function Dev-Name($dev) {
   return 'unnamed device'
 }
 # One line per device: name, ID without the instance part (a USB adapter's
-# serial, often its MAC address), and what nekodrop makes of it.
+# serial, often its MAC address), and what Airdraft makes of it.
 function Wireless-Summary($dev) {
   $c = Classify-WifiCard $dev.InstanceId
   $hw = if ($c.Bus -and $c.HardwareId -and $c.HardwareId -ne $c.Bus) { "$($c.Bus)\$($c.HardwareId)" } else { $c.HardwareId }
   return "$(Dev-Name $dev) (``$(Redact $hw)``): $($c.Chip), $($c.Status)"
 }
-$procs = @('nekodrop-radio', 'nekodrop-radio-rtl', 'awdld', 'nekodrop', 'NekoDropService') | ForEach-Object {
+$procs = @('airdraft-radio', 'airdraft-radio-rtl', 'awdld', 'Airdraft', 'AirdraftRadioService') | ForEach-Object {
   $p = Get-Process $_ -ErrorAction SilentlyContinue
   if ($p) { "$_ (running)" } else { "$_ (not running)" }
 }
@@ -517,13 +522,13 @@ function Stage([string]$name, [string]$ok, [string]$bad, [string]$skipIf = '') {
 $sb = New-Object System.Text.StringBuilder
 function W([string]$s = '') { [void]$sb.AppendLine($s) }
 
-W '# nekodrop diagnostic report'
+W '# Airdraft diagnostic report'
 W ''
 W "Generated $(Get-Date -Format 'yyyy-MM-dd HH:mm'). SSIDs, MAC and IP addresses, the user and computer names are replaced by placeholders; please look it over before posting."
 W ''
 W '## Summary'
 W ''
-W "- nekodrop: $(if ($version) { $version } else { 'not found at ' + (Redact $app) })"
+W "- Airdraft: $(if ($version) { $version } else { 'not found at ' + (Redact $app) })"
 W "- Windows: $(if ($os) { $os.Caption }) $(if ($cv) { $cv.DisplayVersion }) (build $(if ($cv) { "$($cv.CurrentBuild).$($cv.UBR)" }))"
 W "- Service: $(if ($svc) { "$($svc.Status), start $svcStart" } else { 'not installed' }); mode $(if ($config) { $config.Mode } else { '?' })"
 # Without a supported card, say which card is there and why it is not (#16).
@@ -677,9 +682,9 @@ if ($card) {
   # card) can confuse which one Windows uses for its own Wi-Fi.
   $otherWireless | ForEach-Object { W "- Additional wireless device: $(Wireless-Summary $_)" }
 } else {
-  W 'No Wi-Fi card nekodrop supports is present.'
+  W 'No Wi-Fi card Airdraft supports is present.'
   # Each wireless card that is there, with what it is and its driver, so a
-  # report tells an unlisted ID from a card nekodrop cannot drive (#16).
+  # report tells an unlisted ID from a card Airdraft cannot drive (#16).
   foreach ($o in $otherWireless) {
     $c = Classify-WifiCard $o.InstanceId
     W ''
@@ -697,14 +702,16 @@ if ($card) {
   }
   if ($otherWireless.Count) {
     W ''
-    W 'Which cards nekodrop can support, and why: https://github.com/zheznanohana/nekodrop/blob/main/docs/HARDWARE.md'
+    W $(if ($experimental) { 'The Realtek build needs exactly one RTL8852BE (10EC:B852 or 10EC:B85B).' }
+        else { 'The Airdraft developer preview needs exactly one Intel AX210 (8086:2725).' })
   }
 }
 if ($config) {
   W "- Settings: mode $($config.Mode), country '$($config.Country)', start channel $($config.StartChannel), peer channel $($config.PeerChannel), on-demand idle $($config.IdleSeconds) s"
   # The experimental switches change how the radio sends and scans: say which are on.
   # A-MPDU has no switch since 0.1.35 (an old config's "Aggregate" field is stale, so ignore it).
-  W "- Faster sending: always on (0.1.25+). A-MPDU sending: always on (0.1.35+). Experimental: fast passive-channel unlock $(if ($config.FastUnlock) { 'on' } else { 'off' })"
+  if ($experimental) { W '- Experimental radio uses 20 MHz and requires another physical adapter for network connectivity.' }
+  else { W "- Faster sending: always on (0.1.25+). A-MPDU sending: always on (0.1.35+). Experimental: fast passive-channel unlock $(if ($config.FastUnlock) { 'on' } else { 'off' })" }
 }
 W ''
 
@@ -719,12 +726,12 @@ foreach ($a in $presentAdapters) {
   W "| $(Redact $a.Name) | $(Redact $a.InterfaceDescription) | $($a.Status) | $($a.LinkSpeed) | $metric |"
 }
 W ''
-if (-not ($presentAdapters | Where-Object { $_.Name -eq 'nekodrop' })) {
-  $hiddenTap = @(Try-Get { Get-NetAdapter -Name 'nekodrop' -IncludeHidden -ErrorAction Stop })
+if (-not ($presentAdapters | Where-Object { $_.Name -eq 'Airdraft' })) {
+  $hiddenTap = @(Try-Get { Get-NetAdapter -Name 'Airdraft' -IncludeHidden -ErrorAction Stop })
   if ($hiddenTap.Count) {
-    W "nekodrop TAP adapter: $($hiddenTap[0].Status) ($($hiddenTap[0].InterfaceDescription))"
+    W "Airdraft TAP adapter: $($hiddenTap[0].Status) ($($hiddenTap[0].InterfaceDescription))"
   } else {
-    W 'nekodrop TAP adapter: missing'
+    W 'Airdraft TAP adapter: missing'
   }
   W ''
 }
@@ -825,8 +832,8 @@ foreach ($part in @(
 }
 [IO.File]::WriteAllText($logsPath, $full.ToString(), (New-Object System.Text.UTF8Encoding($false)))
 
-Write-Host "nekodrop: report written to $reportPath"
-Write-Host "nekodrop: full logs written to $logsPath"
+Write-Host "Airdraft: report written to $reportPath"
+Write-Host "Airdraft: full logs written to $logsPath"
 if (-not $NoOpen) {
   try { Set-Clipboard -Value $report } catch { }
   Start-Process notepad.exe -ArgumentList "`"$reportPath`""

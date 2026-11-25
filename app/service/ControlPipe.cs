@@ -1,22 +1,31 @@
 // SPDX-License-Identifier: GPL-2.0-only
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.Text;
 using System.Text.Json.Nodes;
 
-namespace NekoDrop.Service;
+namespace Airdraft.Service;
 
 /// <summary>
-/// \\.\pipe\nekodrop: one JSON object a line in each direction. Commands:
+/// \\.\pipe\Airdraft: one JSON object a line in each direction. Commands:
 /// {"do":"status"}, {"do":"mode","mode":"concurrent|ondemand|off"},
 /// {"do":"wake"}, {"do":"touch"}, {"do":"stop"}. Events: "state", "log".
 /// Interactive users and SYSTEM may connect; nothing from the network can.
 /// </summary>
 public sealed class ControlPipe(Supervisor sup)
 {
-    const string Name = "nekodrop";
+    const string Name = "Airdraft";
     readonly List<StreamWriter> _clients = [];
+    readonly SemaphoreSlim _desktopGate = new(1, 1);
+    StreamWriter? _desktop;
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    static extern bool GetNamedPipeClientSessionId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe, out uint sessionId);
+
+    [DllImport("kernel32.dll")]
+    static extern uint WTSGetActiveConsoleSessionId();
 
     public async Task Run(CancellationToken ct)
     {
@@ -46,9 +55,9 @@ public sealed class ControlPipe(Supervisor sup)
 
     async Task Serve(NamedPipeServerStream pipe, CancellationToken ct)
     {
-        using var _ = pipe;
-        var reader = new StreamReader(pipe, Encoding.UTF8);
-        var writer = new StreamWriter(pipe, new UTF8Encoding(false)) { AutoFlush = true };
+        using var connection = pipe;
+        var reader = new StreamReader(connection, Encoding.UTF8);
+        var writer = new StreamWriter(connection, new UTF8Encoding(false)) { AutoFlush = true };
         lock (_clients) _clients.Add(writer);
         try
         {
@@ -60,12 +69,33 @@ public sealed class ControlPipe(Supervisor sup)
                 JsonObject? cmd;
                 try { cmd = JsonNode.Parse(line) as JsonObject; }
                 catch (System.Text.Json.JsonException) { continue; }
-                switch ((string?)cmd?["do"])
+                var operation = (string?)cmd?["do"];
+                if (operation is not ("status" or "desktop-open" or "desktop-close") &&
+                    !ReferenceEquals(Volatile.Read(ref _desktop), writer)) continue;
+                switch (operation)
                 {
                     case "status": await Send(writer, sup.Snapshot()); break;
+                    case "desktop-open":
+                    {
+                        await _desktopGate.WaitAsync(ct);
+                        bool granted;
+                        try
+                        {
+                            granted = (_desktop is null || ReferenceEquals(_desktop, writer)) &&
+                                GetNamedPipeClientSessionId(pipe.SafePipeHandle, out var session) &&
+                                session == WTSGetActiveConsoleSessionId();
+                            if (granted) Volatile.Write(ref _desktop, writer);
+                        }
+                        finally { _desktopGate.Release(); }
+                        await Send(writer, new JsonObject { ["event"] = "desktop", ["granted"] = granted });
+                        break;
+                    }
+                    case "desktop-close": await ReleaseDesktop(writer); break;
                     case "wake": sup.Wake(); break;
+                    case "start-offline-radio": sup.StartOfflineRadio(); break;
+                    case "start-experimental-radio": sup.StartExperimentalRadio(); break;
                     case "touch": sup.Touch(); break;
-                    case "stop": sup.Stop("asked by the client", giveBack: true); break;
+                    case "stop": _ = sup.RequestStop("asked by the client"); break;
                     case "mode":
                         if (Enum.TryParse<NetMode>((string?)cmd?["mode"], true, out var m)) sup.SetMode(m);
                         break;
@@ -106,7 +136,24 @@ public sealed class ControlPipe(Supervisor sup)
         }
         catch (IOException) { }
         catch (OperationCanceledException) { }
-        finally { lock (_clients) _clients.Remove(writer); }
+        finally
+        {
+            lock (_clients) _clients.Remove(writer);
+            await ReleaseDesktop(writer);
+        }
+    }
+
+    async Task ReleaseDesktop(StreamWriter writer)
+    {
+        if (!ReferenceEquals(Volatile.Read(ref _desktop), writer)) return;
+        await _desktopGate.WaitAsync();
+        try
+        {
+            if (!ReferenceEquals(_desktop, writer)) return;
+            try { await sup.RequestStop("desktop session ended"); }
+            finally { Volatile.Write(ref _desktop, null); }
+        }
+        finally { _desktopGate.Release(); }
     }
 
     /// <summary>One write at a time per client: a broadcast and a reply used to

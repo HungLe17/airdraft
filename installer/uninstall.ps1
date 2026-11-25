@@ -1,16 +1,15 @@
 #Requires -RunAsAdministrator
-# Removes nekodrop: gives the Wi-Fi card back to its vendor driver first, then
+# Removes Airdraft: gives the Wi-Fi card back to its vendor driver first, then
 # removes the service, the driver package, the certificate trust, the firewall
-# rules, nekodrop's TAP adapter, settings and the files. Received files stay
-# where they were saved. Best effort: a step that fails is reported in
-# %ProgramData%\nekodrop-uninstall.log and the rest still runs (#22: failures
-# were silent and left parts behind).
-param([string]$Target = "$env:ProgramFiles\nekodrop")
+# rules, Airdraft's TAP adapter, settings and the files. Received files stay
+# where they were saved. A failed Wi-Fi recovery leaves the application and
+# recovery files in place. Cleanup failures go into Airdraft-uninstall.log.
+param([string]$Target = "$env:ProgramFiles\Airdraft")
 $ErrorActionPreference = 'Continue'
-$Service = 'NekoDropService'
-$CertSubject = 'CN=nekodrop driver (signed on this PC)'
-$Log = Join-Path $env:ProgramData 'nekodrop-uninstall.log'
-"nekodrop uninstall $(Get-Date -Format s), target $Target" | Set-Content $Log -ErrorAction SilentlyContinue
+$Service = 'AirdraftRadioService'
+$CertSubject = 'CN=Airdraft driver (signed on this PC)'
+$Log = Join-Path $env:ProgramData 'Airdraft-uninstall.log'
+"Airdraft uninstall $(Get-Date -Format s), target $Target" | Set-Content $Log -ErrorAction SilentlyContinue
 $failures = 0
 function Try-Step($what, [scriptblock]$do) {
   $what
@@ -18,17 +17,23 @@ function Try-Step($what, [scriptblock]$do) {
   catch { $script:failures++; "  FAILED: $what - $($_.Exception.Message)" | Tee-Object -Append $Log }
 }
 
-Try-Step 'Giving the Wi-Fi card back' {
-  if (Get-Service $Service -ErrorAction SilentlyContinue) {
-    Stop-Service $Service -Force -ErrorAction SilentlyContinue  # the card is given back below either way
-    $deadline = (Get-Date).AddSeconds(20)
-    while ((Get-Service $Service).Status -ne 'Stopped' -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 300 }
+$radioService = Get-Service $Service -ErrorAction SilentlyContinue
+if ($radioService) {
+  try {
+    Set-Service $Service -StartupType Disabled -ErrorAction Stop
+    if ($radioService.Status -notin 'Stopped', 'StopPending') { $radioService.Stop() }
+    $radioService.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
+  } catch {
+    "Airdraft is still stopping. Wait for the service to stop before uninstalling again. $($_.Exception.Message)" | Tee-Object -Append $Log
+    exit 1
   }
+}
+Try-Step 'Giving the Wi-Fi card back' {
   # Everything running from the install folder, the AirDrop engine's python.exe too (#22).
   $root = [IO.Path]::GetFullPath($Target).TrimEnd('\') + '\'
-  # Never by path under a drive root or a folder that is not nekodrop's.
-  $byPath = $root.Length -gt 4 -and ((Test-Path (Join-Path $root 'NekoDropService.exe')) -or (Test-Path (Join-Path $root 'python\python.exe')))
-  @(Get-Process nekodrop, nekodrop-radio, nekodrop-radio-rtl, awdld -ErrorAction SilentlyContinue) +
+  # Never by path under a drive root or a folder that is not Airdraft's.
+  $byPath = $root.Length -gt 4 -and ((Test-Path (Join-Path $root 'AirdraftRadioService.exe')) -or (Test-Path (Join-Path $root 'python\python.exe')))
+  @(Get-Process Airdraft, airdraft-radio, airdraft-radio-rtl, airdraft-radio-rtl8852be, awdld -ErrorAction SilentlyContinue) +
   @(Get-Process -ErrorAction SilentlyContinue | Where-Object {
       try { $byPath -and $_.Path -and $_.Path.StartsWith($root, [StringComparison]::OrdinalIgnoreCase) } catch { $false } }) |
     Stop-Process -Force -ErrorAction SilentlyContinue
@@ -38,14 +43,23 @@ Try-Step 'Giving the Wi-Fi card back' {
       $byPath -and $_.ProcessId -ne $PID -and $_.CommandLine -and
       $_.CommandLine.IndexOf($root.TrimEnd(''), [StringComparison]::OrdinalIgnoreCase) -ge 0 }) |
     ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-  $svc = Join-Path $Target 'NekoDropService.exe'
-  if (Test-Path $svc) { & $svc --give-back }
+  $svc = Join-Path $Target 'AirdraftRadioService.exe'
+  if (Test-Path $svc) {
+    & $svc --give-back
+    if ($LASTEXITCODE -ne 0) { throw "Native Wi-Fi recovery is incomplete ($LASTEXITCODE)." }
+  }
   else {
     # A failed update can leave the folder without the service: restore.ps1
     # gives the card back on its own, from the same folder or this script's.
     $restore = @((Join-Path $Target 'restore.ps1'), (Join-Path $PSScriptRoot 'restore.ps1')) | Where-Object { Test-Path $_ } | Select-Object -First 1
-    if ($restore) { & $restore } else { throw "neither NekoDropService.exe nor restore.ps1 is in $Target" }
+    if (!$restore) { throw "neither AirdraftRadioService.exe nor restore.ps1 is in $Target" }
+    & $restore
+    if ($LASTEXITCODE -ne 0) { throw "Standalone Wi-Fi recovery is incomplete ($LASTEXITCODE)." }
   }
+}
+if ($failures) {
+  'Airdraft kept its recovery files. Run restore.cmd before retrying uninstall.' | Tee-Object -Append $Log
+  exit 1
 }
 
 Try-Step 'Service' {
@@ -68,13 +82,13 @@ Try-Step 'Driver package and certificate' {
 }
 
 Try-Step 'Firewall' {
-  Get-NetFirewallRule -Group 'nekodrop AirDrop' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
+  Get-NetFirewallRule -Group 'Airdraft AirDrop' -ErrorAction SilentlyContinue | Remove-NetFirewallRule -ErrorAction Stop
 }
 
-# Only the adapter setup-tap.ps1 made and named "nekodrop"; the TAP-Windows
+# Only the adapter setup-tap.ps1 made and named "Airdraft"; the TAP-Windows
 # driver stays, other programs (VPNs) may use it (#22).
 Try-Step 'TAP adapter' {
-  foreach ($a in @(Get-NetAdapter -Name 'nekodrop' -IncludeHidden -ErrorAction SilentlyContinue |
+  foreach ($a in @(Get-NetAdapter -Name 'Airdraft' -IncludeHidden -ErrorAction SilentlyContinue |
                    Where-Object { $_.InterfaceDescription -like 'TAP-Windows Adapter V9*' })) {
     if ($a.PnPDeviceID) {
       pnputil /remove-device $a.PnPDeviceID | Out-Null
@@ -84,11 +98,13 @@ Try-Step 'TAP adapter' {
 }
 
 Try-Step 'Files' {
-  Get-AppxPackage -AllUsers -Name nekodrop.shell -ErrorAction SilentlyContinue | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
-  $client = Join-Path $Target 'nekodrop.exe'
-  if (Test-Path $client) { & $client --unregister }
-  foreach ($dir in $Target, "$env:ProgramData\nekodrop", "$env:LOCALAPPDATA\nekodrop") {
+  Remove-Item -LiteralPath (Join-Path ([Environment]::GetFolderPath('CommonStartup')) 'Airdraft.lnk') -ErrorAction SilentlyContinue
+  $programs = [Environment]::GetFolderPath('CommonPrograms')
+  foreach ($name in 'Airdraft', 'Airdraft - restore Windows Wi-Fi', 'Airdraft - diagnostic report') {
+    Remove-Item -LiteralPath (Join-Path $programs ($name + '.lnk')) -ErrorAction SilentlyContinue
+  }
+  foreach ($dir in $Target, "$env:ProgramData\Airdraft", "$env:LOCALAPPDATA\Airdraft") {
     if (Test-Path $dir) { Remove-Item $dir -Recurse -Force -ErrorAction Stop }
   }
 }
-if ($failures) { "nekodrop is removed, with $failures step(s) failed: see $Log" } else { 'nekodrop is removed.' }
+if ($failures) { "Airdraft uninstall had $failures failure(s). See $Log."; exit 1 } else { 'Airdraft is removed.' }

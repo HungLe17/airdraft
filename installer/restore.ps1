@@ -1,13 +1,13 @@
 # One-click rollback: puts the PC's Wi-Fi back the way Windows had it, whatever
-# state nekodrop left it in (service running or crashed, card held by the
-# register proxy or by the shelved kernel driver). Needs nothing from nekodrop
-# itself, so it also works when nekodrop's own files are broken or deleted.
-#   1. stops nekodrop and turns its service off (it would take the card again)
+# state Airdraft left it in (service running or crashed, card held by the
+# register proxy or by the shelved kernel driver). Needs nothing from Airdraft
+# itself, so it also works when Airdraft's own files are broken or deleted.
+#   1. stops Airdraft and turns its service off (it would take the card again)
 #   2. binds the card vendor's driver again (the package Windows used before)
-#   3. removes nekodrop's driver packages from the driver store
-#   4. adds back saved Wi-Fi networks Windows lost (from nekodrop's backup)
-#   5. turns the "nekodrop" TAP adapter off and makes sure WLAN AutoConfig runs
-# nekodrop stays installed; run the installer again to use it, or
+#   3. removes Airdraft's driver packages from the driver store
+#   4. adds back saved Wi-Fi networks Windows lost (from Airdraft's backup)
+#   5. turns the "Airdraft" TAP adapter off and makes sure WLAN AutoConfig runs
+# Airdraft stays installed; run the installer again to use it, or
 # -Uninstall to remove it completely afterwards.
 # -SelfTest checks target card resolution and vendor driver-package selection
 # against made-up devices and exits 0 (all pass) or 1; it needs no
@@ -17,16 +17,17 @@
 # is checked while the script is parsed, before param(), so -SelfTest could not
 # run on a build machine without them. The same check is made below instead,
 # before anything is written.
-# Log: %ProgramData%\nekodrop\restore.log
-param([switch]$Uninstall, [switch]$SelfTest)
+# Log: %ProgramData%\Airdraft\restore.log
+param([switch]$Uninstall, [switch]$SelfTest, [switch]$Elevate)
 $ErrorActionPreference = 'Continue'
 
 # ------------------------------------------------ standalone vendor rollback data
-# Self-contained (never reads %ProgramFiles%\nekodrop). Keep $SupportedIntelIds
+# Self-contained (never reads %ProgramFiles%\Airdraft). Keep $SupportedIntelIds
 # in step with iwxradio/src/cards.h, app/service/CardCatalog.cs,
 # driver/regproxy/winawdl_regproxy.inf, installer/report.ps1 and install.ps1.
 $SupportedIntelIds = @('43F0', 'A0F0', '02F0', '06F0', '34F0', '3DF0', '4DF0', '2723', '2725', '7A70', '7AF0', '51F0', '51F1', '54F0', '7F70')
-$KnownCatalogIds = @($SupportedIntelIds | ForEach-Object { "8086:$_" }) + @('10EC:C852')
+$KnownCatalogIds = @($SupportedIntelIds | ForEach-Object { "8086:$_" }) + @('10EC:C852', '10EC:B852', '10EC:B85B')
+$Rtl8852bePattern = '^PCI\\VEN_10EC&DEV_(?:B852|B85B)(?:&|\\|$)'
 $ProxyInfNames = @('winawdl_regproxy.inf', 'nekodrop-wlan.inf')
 $ProxyServices = @('WUDFRd', 'nekodrop-wlan')
 $ProxyProvider = 'winairdrop project'
@@ -74,7 +75,7 @@ function Get-VendorProfile([string]$VendorId) {
   }
 }
 
-function Get-NekodropPublishedInfs($StoreDrivers) {
+function Get-AirdraftPublishedInfs($StoreDrivers) {
   $seen = @{}
   $out = @()
   foreach ($d in @($StoreDrivers | Where-Object { $_ })) {
@@ -91,12 +92,12 @@ function Get-NekodropPublishedInfs($StoreDrivers) {
   return @($out)
 }
 
-function Test-NekodropInfContent([string]$Content) {
+function Test-AirdraftInfContent([string]$Content) {
   if (-not $Content) { return $false }
   return ($Content -match '(?i)winawdl_regproxy|nekodrop-wlan|winairdrop project')
 }
 
-function Test-DeviceBoundToNekodrop($Device, [string[]]$NekodropPublishedInfs) {
+function Test-DeviceBoundToAirdraft($Device, [string[]]$AirdraftPublishedInfs) {
   if (-not $Device) { return $false }
   $svc = "$($Device.Service)".Trim()
   if ($svc -and ($ProxyServices -notcontains $svc)) { return $false }
@@ -105,22 +106,61 @@ function Test-DeviceBoundToNekodrop($Device, [string[]]$NekodropPublishedInfs) {
   $isOurInf = $false
   if ($inf) {
     if ($ProxyInfNames -contains $inf) { $isOurInf = $true }
-    elseif ($NekodropPublishedInfs -and ($NekodropPublishedInfs -contains $inf)) { $isOurInf = $true }
+    elseif ($AirdraftPublishedInfs -and ($AirdraftPublishedInfs -contains $inf)) { $isOurInf = $true }
   }
   $isOurProvider = ($prov -and ($prov -eq $ProxyProvider))
   return ($isOurInf -or $isOurProvider)
 }
 
+function Read-DriverBinding($Device) {
+  $properties = @{}
+  Get-PnpDeviceProperty -InstanceId $Device.InstanceId -ErrorAction SilentlyContinue -KeyName @(
+    'DEVPKEY_Device_Service', 'DEVPKEY_Device_DriverInfPath', 'DEVPKEY_Device_DriverProvider'
+  ) | ForEach-Object { $properties[$_.KeyName] = $_.Data }
+  [pscustomobject]@{
+    InstanceId     = $Device.InstanceId
+    FriendlyName   = $Device.FriendlyName
+    Status         = $Device.Status
+    Service        = $(if ($properties.DEVPKEY_Device_Service) { $properties.DEVPKEY_Device_Service } else { $Device.Service })
+    DriverInfPath  = $properties.DEVPKEY_Device_DriverInfPath
+    DriverProvider = $properties.DEVPKEY_Device_DriverProvider
+  }
+}
+
+function Test-VendorBinding($Device, [string[]]$AirdraftPublishedInfs) {
+  return ($Device -and $Device.Status -eq 'OK' -and $Device.Service -and $Device.DriverInfPath -and
+          $Device.Service -notin $ProxyServices -and $Device.DriverProvider -ne $ProxyProvider -and
+          [IO.Path]::GetFileName($Device.DriverInfPath) -notin ($AirdraftPublishedInfs + $ProxyInfNames))
+}
+
+function Get-RestoredAdapter([string]$InstanceId) {
+  Get-NetAdapter -IncludeHidden -ErrorAction SilentlyContinue |
+    Where-Object { $_.PnPDeviceID -eq $InstanceId -and $_.Status -ne 'Not Present' } | Select-Object -First 1
+}
+
+function Test-NativeIpPath([uint32]$Index, [string]$Family, [string]$Prefix) {
+  $route = Get-NetRoute -InterfaceIndex $Index -DestinationPrefix $Prefix -PolicyStore ActiveStore -ErrorAction SilentlyContinue |
+    Where-Object { $_.NextHop -and $_.NextHop -notin '::', '0.0.0.0' } | Select-Object -First 1
+  if (!$route) { return $false }
+  $address = Get-NetIPAddress -InterfaceIndex $Index -AddressFamily $Family -AddressState Preferred -SkipAsSource $false -ErrorAction SilentlyContinue |
+    Where-Object {
+      $ip = [Net.IPAddress]::Parse($_.IPAddress)
+      ![Net.IPAddress]::IsLoopback($ip) -and !$ip.IsIPv6LinkLocal -and
+        $ip -ne [Net.IPAddress]::Any -and $ip -ne [Net.IPAddress]::IPv6Any -and $_.IPAddress -notlike '169.254.*'
+    } | Select-Object -First 1
+  return [bool]$address
+}
+
 # Picks the PCI Wi-Fi card to restore:
-#   1. any present PCI device currently bound to nekodrop's proxy or kernel
+#   1. any present PCI device currently bound to Airdraft's proxy or kernel
 #      driver (WUDFRd / nekodrop-wlan AND our published INF or provider, never
 #      unrelated UMDF devices such as sensors or HID);
 #   2. else any of the 15 supported Intel PCI IDs (identical to earlier builds);
 #   3. else any other known catalog PCI ID (such as Realtek 10EC:C852).
-function Resolve-RestoreTargetDevice($Devices, [string[]]$NekodropPublishedInfs = @()) {
+function Resolve-RestoreTargetDevice($Devices, [string[]]$AirdraftPublishedInfs = @()) {
   $pciDevs = @($Devices | Where-Object { $_ -and (Get-PciVendorDevice $_.InstanceId) })
   foreach ($d in $pciDevs) {
-    if (Test-DeviceBoundToNekodrop $d $NekodropPublishedInfs) { return $d }
+    if (Test-DeviceBoundToAirdraft $d $AirdraftPublishedInfs) { return $d }
   }
   foreach ($d in $pciDevs) {
     $pci = Get-PciVendorDevice $d.InstanceId
@@ -166,16 +206,17 @@ function Parse-DriverVersion([string]$VersionText) {
 
 # Picks the vendor INF to bind back:
 #   1. recorded path (vendor-inf.txt, then service.json's VendorInf), provided
-#      it is under %windir%\INF, exists, and is not nekodrop's own INF (#12);
+#      it is under %windir%\INF, exists, and is not Airdraft's own INF (#12);
 #   2. else the newest Net package in the driver store matching this PCI
-#      vendor's provider patterns (never nekodrop's own INF or provider).
+#      vendor's provider patterns (never Airdraft's own INF or provider).
 function Select-VendorInfPackage(
   $RecordedInfCandidates,
   $StoreDrivers,
   [string]$VendorId,
   [string]$Windir = $env:windir,
   [scriptblock]$PathExists = $null,
-  [scriptblock]$ReadInfText = $null
+  [scriptblock]$ReadInfText = $null,
+  [string]$HardwareId = ''
 ) {
   if (-not $PathExists) {
     $PathExists = {
@@ -189,7 +230,8 @@ function Select-VendorInfPackage(
   if (-not $ReadInfText) {
     $ReadInfText = { param($p) Get-Content -LiteralPath $p -Raw -ErrorAction SilentlyContinue }
   }
-  $nekodropInfs = @(Get-NekodropPublishedInfs $StoreDrivers)
+  $AirdraftInfs = @(Get-AirdraftPublishedInfs $StoreDrivers)
+  $deviceMatch = if ($HardwareId) { '(?im)^[^;\r\n]*,\s*' + [regex]::Escape($HardwareId) + '(?=&|[\s,;]|$)' }
   $winRoot = if ($Windir) { ($Windir.Trim() -replace '/', '\').TrimEnd('\') } else { '' }
   foreach ($cand in @($RecordedInfCandidates | Where-Object { $_ })) {
     $path = "$cand".Trim()
@@ -200,10 +242,11 @@ function Select-VendorInfPackage(
     }
     if (-not (Test-TrustedInfPath $path $Windir)) { continue }
     $leaf = [IO.Path]::GetFileName($path)
-    if (($ProxyInfNames -contains $leaf) -or ($nekodropInfs -contains $leaf)) { continue }
+    if (($ProxyInfNames -contains $leaf) -or ($AirdraftInfs -contains $leaf)) { continue }
     if (-not (& $PathExists $path)) { continue }
     $txt = & $ReadInfText $path
-    if (Test-NekodropInfContent "$txt") { continue }
+    if (Test-AirdraftInfContent "$txt") { continue }
+    if ($deviceMatch -and "$txt" -notmatch $deviceMatch) { continue }
     return $path
   }
 
@@ -216,8 +259,9 @@ function Select-VendorInfPackage(
     $orig = [IO.Path]::GetFileName("$($_.OriginalName)".Trim())
     $pub = [IO.Path]::GetFileName("$($_.DriverName)".Trim())
     $prov = "$($_.ProviderName)".Trim()
-    if (($ProxyInfNames -contains $orig) -or ($nekodropInfs -contains $pub)) { return $false }
+    if (($ProxyInfNames -contains $orig) -or ($AirdraftInfs -contains $pub)) { return $false }
     if ($prov -eq $ProxyProvider) { return $false }
+    if ($deviceMatch -and "$(& $ReadInfText "$winRoot\INF\$pub")" -notmatch $deviceMatch) { return $false }
     return ($prov -match $pattern)
   }) | Sort-Object { Parse-DriverVersion $_.DriverVersion } -Descending | Select-Object -First 1
   if ($pkg -and $pkg.DriverName -and $winRoot) {
@@ -229,8 +273,8 @@ function Select-VendorInfPackage(
 
 if ($SelfTest) {
   $fail = @()
-  function Dev([string]$id, [string]$svc = '', [string]$inf = '', [string]$prov = '', [string]$name = '') {
-    [pscustomobject]@{ InstanceId = $id; Service = $svc; DriverInfPath = $inf; DriverProvider = $prov; FriendlyName = $name }
+  function Dev([string]$id, [string]$svc = '', [string]$inf = '', [string]$prov = '', [string]$name = '', [string]$status = 'OK') {
+    [pscustomobject]@{ InstanceId = $id; Service = $svc; DriverInfPath = $inf; DriverProvider = $prov; FriendlyName = $name; Status = $status }
   }
   function Drv([string]$pub, [string]$orig, [string]$prov, [string]$cls, [string]$ver) {
     [pscustomobject]@{ DriverName = $pub; OriginalName = $orig; ProviderName = $prov; ClassName = $cls; DriverVersion = $ver }
@@ -263,12 +307,12 @@ if ($SelfTest) {
     (Drv 'oem43.inf' 'nekodrop-wlan.inf'   'winairdrop project'          'Net'          '03/01/2026 99.9.9.9'),
     (Drv 'oem5.inf'  'sensors.inf'         'Microsoft'                   'Sensor'       '01/01/2024 10.0.19041.1')
   )
-  $pubProxy = @(Get-NekodropPublishedInfs $store)
+  $pubProxy = @(Get-AirdraftPublishedInfs $store)
   if ($pubProxy.Count -ne 2 -or $pubProxy -notcontains 'oem42.inf' -or $pubProxy -notcontains 'oem43.inf') {
-    $fail += "nekodrop published INFs wrong: $($pubProxy -join ', ')"
+    $fail += "Airdraft published INFs wrong: $($pubProxy -join ', ')"
   }
 
-  # 2. Intel driver-store selection (newest version, Killer supported, Bluetooth and nekodrop ignored).
+  # 2. Intel driver-store selection (newest version, Killer supported, Bluetooth and Airdraft ignored).
   $intelPkg = Select-VendorInfPackage @() $store '8086' 'C:\Windows' { param($p) $false } { param($p) '' }
   if ($intelPkg -ne 'C:\Windows\INF\oem11.inf') { $fail += "Intel store fallback picked '$intelPkg', want oem11.inf" }
   $killerOnly = @(
@@ -290,6 +334,14 @@ if ($SelfTest) {
   if (-not $pickedRtl -or $pickedRtl.InstanceId -notmatch 'DEV_C852') { $fail += 'Realtek 10EC:C852 not selected' }
   $rtlPkg = Select-VendorInfPackage @() $store '10EC' 'C:\Windows' { param($p) $false } { param($p) '' }
   if ($rtlPkg -ne 'C:\Windows\INF\oem21.inf') { $fail += "Realtek store fallback picked '$rtlPkg', want oem21.inf" }
+  $readRtl = {
+    param($path)
+    if ($path -like '*\oem20.inf') { '%Realtek% = Install, PCI\VEN_10EC&DEV_B85B&SUBSYS_B85B10EC' }
+    if ($path -like '*\oem21.inf') { '%Realtek% = Install, PCI\VEN_10EC&DEV_B852' }
+  }
+  $alternatePkg = Select-VendorInfPackage @('oem21.inf') $store '10EC' 'C:\Windows' { param($p) $true } $readRtl `
+    -HardwareId 'PCI\VEN_10EC&DEV_B85B'
+  if ($alternatePkg -ne 'C:\Windows\INF\oem20.inf') { $fail += 'RTL8852BE B85B recovery did not require the matching PCI ID' }
   $intelOnlyStore = @((Drv 'oem11.inf' 'netwtw14.inf' 'Intel Corporation' 'Net' '08/15/2024 23.80.0.7'))
   if ($null -ne (Select-VendorInfPackage @() $intelOnlyStore '10EC' 'C:\Windows' { param($p) $false } { param($p) '' })) {
     $fail += 'Realtek fallback selected an Intel driver package'
@@ -301,17 +353,17 @@ if ($SelfTest) {
   if ((Select-VendorInfPackage @() $store '14E4' 'C:\Windows' { param($p) $false } { param($p) '' }) -ne 'C:\Windows\INF\oem32.inf') { $fail += 'Broadcom fallback failed' }
   if ($null -ne (Select-VendorInfPackage @() $store '1AE0' 'C:\Windows' { param($p) $false } { param($p) '' })) { $fail += 'unknown vendor selected a driver package' }
 
-  # 5. Unknown PCI device bound to WUDFRd + nekodrop's INF IS selected, while
+  # 5. Unknown PCI device bound to WUDFRd + Airdraft's INF IS selected, while
   # unrelated WUDFRd PCI device (sensors.inf) is strictly ignored.
   $mixedDevs = @(
     (Dev 'PCI\VEN_8086&DEV_9D3A&SUBSYS_00008086\3&1' 'WUDFRd' 'oem5.inf' 'Microsoft' 'PCI Sensor'),
     (Dev 'PCI\VEN_14C3&DEV_7922&SUBSYS_7922103C\4&1' 'WUDFRd' 'oem42.inf' 'winairdrop project' 'WinAwdl Radio')
   )
   $pickedBound = Resolve-RestoreTargetDevice $mixedDevs $pubProxy
-  if (-not $pickedBound -or $pickedBound.InstanceId -notmatch 'DEV_7922') { $fail += 'device bound to nekodrop proxy was not selected' }
+  if (-not $pickedBound -or $pickedBound.InstanceId -notmatch 'DEV_7922') { $fail += 'device bound to Airdraft proxy was not selected' }
   $sensorOnly = @((Dev 'PCI\VEN_8086&DEV_9D3A&SUBSYS_00008086\3&1' 'WUDFRd' 'oem5.inf' 'Microsoft' 'PCI Sensor'))
   if ($null -ne (Resolve-RestoreTargetDevice $sensorOnly $pubProxy)) { $fail += 'unrelated WUDFRd sensor device was wrongly selected' }
-  $kdrvOnly = @((Dev 'PCI\VEN_1234&DEV_5678&SUBSYS_00001234\4&1' 'nekodrop-wlan' 'oem43.inf' 'winairdrop project' 'nekodrop WLAN'))
+  $kdrvOnly = @((Dev 'PCI\VEN_1234&DEV_5678&SUBSYS_00001234\4&1' 'nekodrop-wlan' 'oem43.inf' 'winairdrop project' 'Airdraft WLAN'))
   if ($null -eq (Resolve-RestoreTargetDevice $kdrvOnly $pubProxy)) { $fail += 'device bound to nekodrop-wlan was not selected' }
   $provOnly = @((Dev 'PCI\VEN_1234&DEV_5679&SUBSYS_00001234\4&1' 'WUDFRd' 'oem99.inf' 'winairdrop project' 'WinAwdl Radio'))
   if ($null -eq (Resolve-RestoreTargetDevice $provOnly @())) { $fail += 'device with winairdrop project provider was not selected' }
@@ -347,8 +399,15 @@ if ($SelfTest) {
   $p7 = Select-VendorInfPackage @('oem42.inf', 'oem79.inf') $store '8086' 'C:\Windows' $existsFn $readFn
   if ($p7 -ne 'C:\Windows\INF\oem11.inf') { $fail += "bare leaf poisoned proxy INF was not rejected: got '$p7'" }
 
+  $testId = 'PCI\VEN_8086&DEV_2725\4&1'
+  if (!(Test-VendorBinding (Dev $testId 'Netwtw14' 'oem77.inf' 'Intel') $pubProxy)) { $fail += 'working vendor binding rejected' }
+  if (Test-VendorBinding (Dev $testId 'Netwtw14' 'oem77.inf' 'Intel' '' 'Error') $pubProxy) { $fail += 'failed vendor binding confirmed' }
+  if (Test-VendorBinding (Dev $testId 'WUDFRd' 'oem42.inf' $ProxyProvider) $pubProxy) { $fail += 'proxy binding confirmed' }
+  if (Test-VendorBinding (Dev $testId 'Netwtw14' 'oem42.inf' 'Intel') $pubProxy) { $fail += 'published proxy INF confirmed' }
+  if (Test-VendorBinding (Dev $testId 'Netwtw14') $pubProxy) { $fail += 'binding without a driver INF confirmed' }
+
   if ($fail) { $fail | ForEach-Object { Write-Host "FAIL $_" }; exit 1 }
-  Write-Host 'restore.ps1 self-test: target resolution, multi-vendor driver selection and poisoned-INF guards passed'
+  Write-Host 'restore.ps1 self-test: target resolution, vendor driver selection and binding verification passed'
   exit 0
 }
 
@@ -357,22 +416,44 @@ if ($SelfTest) {
 $isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole(
   [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin) {
+  if ($Elevate) {
+    $arguments = '-NoProfile -ExecutionPolicy Bypass -File "' + $PSCommandPath + '"'
+    if ($Uninstall) { $arguments += ' -Uninstall' }
+    try {
+      $process = Start-Process -FilePath powershell.exe -Verb RunAs -ArgumentList $arguments -Wait -PassThru -ErrorAction Stop
+      exit $process.ExitCode
+    } catch {
+      Write-Host "Could not start recovery as administrator. $($_.Exception.Message)"
+      exit 1
+    }
+  }
   Write-Host 'restore.ps1 needs administrator rights: run it from an administrator PowerShell, or double-click restore.cmd.'
   exit 1
 }
 
-$state = Join-Path $env:ProgramData 'nekodrop'
-New-Item -ItemType Directory -Force $state | Out-Null
+$state = Join-Path $env:ProgramData 'Airdraft'
+New-Item -ItemType Directory -Force $state -ErrorAction Stop | Out-Null
+if ((Get-Item -LiteralPath $state -Force).Attributes -band [IO.FileAttributes]::ReparsePoint) {
+  "Refusing reparse point: $state"
+  exit 1
+}
 Start-Transcript (Join-Path $state 'restore.log') -Force | Out-Null
 
-'1. Stopping nekodrop'
-$svc = Get-Service NekoDropService -ErrorAction SilentlyContinue
+'1. Stopping Airdraft'
+$svc = Get-Service AirdraftRadioService -ErrorAction SilentlyContinue
 if ($svc) {
-  Stop-Service NekoDropService -Force -ErrorAction SilentlyContinue
-  Set-Service NekoDropService -StartupType Disabled
+  try {
+    Set-Service AirdraftRadioService -StartupType Disabled -ErrorAction Stop
+    if ($svc.Status -notin 'Stopped', 'StopPending') { $svc.Stop() }
+    $svc.WaitForStatus('Stopped', [TimeSpan]::FromSeconds(60))
+  } catch {
+    Write-Host "Airdraft is still stopping. Wait for the service to stop before running recovery again. $($_.Exception.Message)"
+    Stop-Transcript | Out-Null
+    exit 1
+  }
   '   service stopped and disabled'
 }
-Get-Process nekodrop-radio, nekodrop-radio-rtl, awdld -ErrorAction SilentlyContinue | Stop-Process -Force
+Get-Process airdraft-radio, airdraft-radio-rtl, airdraft-radio-rtl8852be, awdld -ErrorAction SilentlyContinue | Stop-Process -Force
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" |
   Where-Object { $_.CommandLine -like '*airdrop*engine.py*' } |
   ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
@@ -385,67 +466,103 @@ try {
     $storeDrivers = @($storeXml.PnpUtil.Driver)
   }
 } catch { }
-$nekodropInfs = @(Get-NekodropPublishedInfs $storeDrivers)
+$AirdraftInfs = @(Get-AirdraftPublishedInfs $storeDrivers)
 
-$presentPci = @(Get-PnpDevice -PresentOnly | Where-Object { $_ -and (Get-PciVendorDevice $_.InstanceId) })
+try { $presentPci = @(Get-PnpDevice -PresentOnly -ErrorAction Stop | Where-Object { $_ -and (Get-PciVendorDevice $_.InstanceId) }) }
+catch {
+  "Could not enumerate PCI devices. Airdraft kept its recovery files. $($_.Exception.Message)"
+  Stop-Transcript | Out-Null
+  exit 1
+}
 $pciCandidates = foreach ($p in $presentPci) {
   $pciInfo = Get-PciVendorDevice $p.InstanceId
   $svcName = "$($p.Service)".Trim()
   $needProps = ($ProxyServices -contains $svcName) -or ($KnownCatalogIds -contains $pciInfo.Key) -or
                ("$($p.Class)" -in 'WinAwdlRadio', 'Net', 'Unknown', '')
   if (-not $needProps) { continue }
-  $propSvc = (Get-PnpDeviceProperty -InstanceId $p.InstanceId -KeyName DEVPKEY_Device_Service -ErrorAction SilentlyContinue).Data
-  $propInf = (Get-PnpDeviceProperty -InstanceId $p.InstanceId -KeyName DEVPKEY_Device_DriverInfPath -ErrorAction SilentlyContinue).Data
-  $propProv = (Get-PnpDeviceProperty -InstanceId $p.InstanceId -KeyName DEVPKEY_Device_DriverProvider -ErrorAction SilentlyContinue).Data
-  [pscustomobject]@{
-    InstanceId     = $p.InstanceId
-    FriendlyName   = $p.FriendlyName
-    Status         = $p.Status
-    Service        = $(if ($propSvc) { "$propSvc" } else { $svcName })
-    DriverInfPath  = $(if ($propInf) { "$propInf" } else { '' })
-    DriverProvider = $(if ($propProv) { "$propProv" } else { '' })
+  Read-DriverBinding $p
+}
+$savedConfig = $null
+$configFile = Join-Path $state 'service.json'
+if (Test-Path -LiteralPath $configFile -PathType Leaf) {
+  try { $savedConfig = Get-Content -LiteralPath $configFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+  catch {
+    "Could not read the Wi-Fi recovery journal. Airdraft kept its recovery files. $($_.Exception.Message)"
+    Stop-Transcript | Out-Null
+    exit 1
   }
 }
-$dev = Resolve-RestoreTargetDevice $pciCandidates $nekodropInfs
+$pendingNetwork = $savedConfig.PendingWifiReturn
+$recoveryExpected = $savedConfig.VendorDriverReturnPending -eq $true -or $null -ne $pendingNetwork
+$recordedId = if ($pendingNetwork.InstanceId) { $pendingNetwork.InstanceId } else { $savedConfig.VendorInstanceId }
+$experimental = (Test-Path -LiteralPath (Join-Path $PSScriptRoot 'RTL8852BE.experimental') -PathType Leaf) -or
+                $recordedId -match $Rtl8852bePattern
+if ($recoveryExpected) {
+  $dev = $presentPci | Where-Object InstanceId -EQ $recordedId | ForEach-Object { Read-DriverBinding $_ } | Select-Object -First 1
+} elseif ($experimental) {
+  $targets = @($pciCandidates | Where-Object InstanceId -Match $Rtl8852bePattern)
+  $dev = if ($targets.Count -eq 1) { $targets[0] }
+} else {
+  $dev = Resolve-RestoreTargetDevice $pciCandidates $AirdraftInfs
+  if ($dev -and $dev.InstanceId -match $Rtl8852bePattern) {
+    $experimental = $true
+    if (@($pciCandidates | Where-Object InstanceId -Match $Rtl8852bePattern).Count -ne 1) { $dev = $null }
+  }
+}
+if (!$dev -and $recoveryExpected) {
+  "The Wi-Fi card in the recovery journal is missing ($recordedId). Restart Windows and run recovery again."
+  Stop-Transcript | Out-Null
+  exit 1
+}
 if (-not $dev) {
-  '   no Wi-Fi card nekodrop knows or holds is present; nothing to give back'
+  '   no Wi-Fi card Airdraft knows or holds is present; nothing to give back'
 } else {
   $pci = Get-PciVendorDevice $dev.InstanceId
   $profile = Get-VendorProfile $pci.VendorId
   "   card: $($dev.InstanceId), now $($dev.FriendlyName) ($($dev.Status))"
-  # Vendor package: the one nekodrop recorded before taking the card (validated
+  # Vendor package: the one Airdraft recorded before taking the card (validated
   # so a poisoned proxy INF is never reused), else the newest matching Net
   # package in the driver store for this PCI vendor.
   $recorded = @()
-  foreach ($f in (Join-Path $state 'vendor-inf.txt'), (Join-Path $state 'service.json')) {
-    if (-not (Test-Path -LiteralPath $f)) { continue }
-    $text = Get-Content -LiteralPath $f -Raw -ErrorAction SilentlyContinue
-    if ($f -like '*.json') { try { $text = ($text | ConvertFrom-Json).VendorInf } catch { $text = $null } }
-    if ($text) { $recorded += $text.Trim() }
+  if (!$experimental) {
+    $legacyInf = Get-Content -LiteralPath (Join-Path $state 'vendor-inf.txt') -Raw -ErrorAction SilentlyContinue
+    if ($legacyInf) { $recorded += $legacyInf.Trim() }
   }
-  $vendor = Select-VendorInfPackage $recorded $storeDrivers $pci.VendorId $env:windir
-  $bound = $false
-  if ($vendor) {
+  if ($savedConfig.VendorInf -and (($savedConfig.VendorInstanceId -eq $dev.InstanceId) -or
+      (!$experimental -and !$savedConfig.VendorInstanceId))) { $recorded += $savedConfig.VendorInf }
+  $bound = Test-VendorBinding $dev $AirdraftInfs
+  $restartRequired = $false
+  $vendor = if (!$bound) {
+    $exactId = if ($experimental) { $pci.HardwareId } else { '' }
+    Select-VendorInfPackage $recorded $storeDrivers $pci.VendorId $env:windir -HardwareId $exactId
+  }
+  if ($bound) {
+    '   the card already has a working Windows driver'
+  } elseif ($vendor) {
+    if (@($presentPci | Where-Object { (Get-PciVendorDevice $_.InstanceId).Key -eq $pci.Key }).Count -gt 1) {
+      'More than one matching card is present. Windows Device Manager can restore the driver on the exact card shown above.'
+      Stop-Transcript | Out-Null
+      exit 1
+    }
     "   binding $vendor"
     $hwid = $pci.HardwareId
-    # INSTALLFLAG_FORCE: the vendor's INF ranks higher anyway, but the proxy is bound now.
-    $job = Start-Job -ScriptBlock {
-      param($h, $v)
-      Add-Type -Namespace NekoRestore -Name NewDev -MemberDefinition @'
+    # Keep the bind synchronous so device removal cannot race this Windows request.
+    if (-not ('AirdraftRestore.NewDev' -as [type])) {
+      Add-Type -Namespace AirdraftRestore -Name NewDev -ErrorAction Stop -MemberDefinition @'
 [System.Runtime.InteropServices.DllImport("newdev.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
 public static extern bool UpdateDriverForPlugAndPlayDevicesW(System.IntPtr hwnd, string hardwareId, string infPath, uint flags, out bool reboot);
 '@
-      $r = $false
-      [NekoRestore.NewDev]::UpdateDriverForPlugAndPlayDevicesW([IntPtr]::Zero, $h, $v, 1, [ref]$r)
-    } -ArgumentList $hwid, $vendor
-    # The call has been seen to block for minutes: wait at most 90 s, then check.
-    if (Wait-Job $job -Timeout 90) { $bound = [bool](Receive-Job $job | Select-Object -Last 1) }
-    Remove-Job $job -Force -ErrorAction SilentlyContinue
+    }
+    '   waiting for Windows to finish restoring the driver'
+    if (![AirdraftRestore.NewDev]::UpdateDriverForPlugAndPlayDevicesW([IntPtr]::Zero, $hwid, $vendor, 5, [ref]$restartRequired)) {
+      "   driver bind returned Windows error $([Runtime.InteropServices.Marshal]::GetLastWin32Error())"
+    }
+    if ($restartRequired) { '   Windows requested a restart to complete the driver change' }
   } else {
     "   $($profile.Name)'s driver package was not found in the driver store"
   }
 
-  '3. Removing nekodrop''s driver packages'
+  '3. Removing Airdraft''s driver packages'
   try {
     $store = [xml](pnputil /enum-drivers /format xml | Out-String)
     if ($store -and $store.PnpUtil -and $store.PnpUtil.Driver) {
@@ -455,75 +572,103 @@ public static extern bool UpdateDriverForPlugAndPlayDevicesW(System.IntPtr hwnd,
     }
   } catch { }
 
-  # If the bind did not take, let Plug and Play choose again: with nekodrop's
+  # If the bind did not take, let Plug and Play choose again: with Airdraft's
   # packages gone, the vendor's is the best match left.
-  $now = Get-PnpDevice -InstanceId $dev.InstanceId -ErrorAction SilentlyContinue
-  $service = (Get-PnpDeviceProperty -InstanceId $dev.InstanceId -KeyName DEVPKEY_Device_Service -ErrorAction SilentlyContinue).Data
-  if (-not $bound -or $service -in $ProxyServices) {
+  $after = Get-PnpDevice -InstanceId $dev.InstanceId -PresentOnly -ErrorAction SilentlyContinue | ForEach-Object { Read-DriverBinding $_ }
+  if (!(Test-VendorBinding $after $AirdraftInfs) -and !$restartRequired) {
     '   re-detecting the card'
     pnputil /remove-device $dev.InstanceId | Out-Null
     pnputil /scan-devices | Out-Null
-    Start-Sleep 5
+    for ($i = 0; $i -lt 15; $i++) {
+      $after = Get-PnpDevice -InstanceId $dev.InstanceId -PresentOnly -ErrorAction SilentlyContinue | ForEach-Object { Read-DriverBinding $_ }
+      if (Test-VendorBinding $after $AirdraftInfs) { break }
+      Start-Sleep 1
+    }
   }
+  if (!(Test-VendorBinding $after $AirdraftInfs)) {
+    "Windows has not confirmed a working $($profile.Name) driver on this card. Restart Windows and run recovery again. If Wi-Fi is still missing, get the driver from $($profile.DownloadHint)."
+    Stop-Transcript | Out-Null
+    exit 1
+  }
+  "   Wi-Fi card: $($after.FriendlyName), driver service $($after.Service), status $($after.Status)"
 }
 
 '4. Saved Wi-Fi networks'
 # The service backs up Windows' saved networks before taking the card; add
 # back any the Wi-Fi interface lacks now (it can come back under a new GUID).
-$backup = Join-Path $state 'wlan-backup'
-if (Test-Path $backup) {
-  Start-Service WlanSvc -ErrorAction SilentlyContinue
-  for ($i = 0; $i -lt 30 -and -not ((netsh wlan show interfaces | Out-String) -match 'GUID'); $i++) { Start-Sleep 1 }
+$backup = Join-Path $state $(if ($experimental) { 'wlan-backup-rtl8852be' } else { 'wlan-backup' })
+Set-Service WlanSvc -StartupType Automatic -ErrorAction SilentlyContinue
+Start-Service WlanSvc -ErrorAction SilentlyContinue
+if ($dev -and (Test-Path -LiteralPath $backup -PathType Container)) {
+  for ($i = 0; $i -lt 20; $i++) {
+    $adapter = Get-RestoredAdapter $dev.InstanceId
+    if ($adapter) { break }
+    Start-Sleep 1
+  }
+  if (!$adapter) {
+    'Windows has not made the restored Wi-Fi interface available for its saved profiles. Run recovery again once the interface appears.'
+    Stop-Transcript | Out-Null
+    exit 1
+  }
   # The interface's own profiles, read back through netsh (its text output is localized).
-  $tmp = Join-Path $state 'wlan-current'
-  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
-  New-Item -ItemType Directory -Force $tmp | Out-Null
-  netsh wlan export profile folder="$tmp" | Out-Null
-  $have = @(Get-ChildItem $tmp -Filter *.xml | ForEach-Object { try { ([xml](Get-Content $_.FullName -Raw)).WLANProfile.name } catch { } })
-  Remove-Item $tmp -Recurse -Force -ErrorAction SilentlyContinue
+  $tmp = Join-Path $state ('wlan-current-' + [Guid]::NewGuid().ToString('N'))
+  New-Item -ItemType Directory -Path $tmp -ErrorAction Stop | Out-Null
+  $interfaceArg = "interface=$($adapter.Name)"
+  netsh wlan export profile "folder=$tmp" $interfaceArg | Out-Null
+  $profiles = @(Get-ChildItem -LiteralPath $tmp -Filter *.xml -File)
+  $have = @($profiles | ForEach-Object { try { ([xml](Get-Content -LiteralPath $_.FullName -Raw)).WLANProfile.name } catch { } })
+  foreach ($profileFile in $profiles) { Remove-Item -LiteralPath $profileFile.FullName -Force }
+  [IO.Directory]::Delete($tmp)
   $added = 0
-  foreach ($f in Get-ChildItem $backup -Filter *.xml) {
-    try { $name = ([xml](Get-Content $f.FullName -Raw)).WLANProfile.name } catch { continue }
+  $failedProfiles = 0
+  foreach ($f in Get-ChildItem -LiteralPath $backup -Filter *.xml -File) {
+    try { $name = ([xml](Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop)).WLANProfile.name }
+    catch { $failedProfiles++; continue }
     if ($have -contains $name) { continue }
-    netsh wlan add profile filename="$($f.FullName)" user=all | Out-Null
-    if ($LASTEXITCODE -eq 0) { $added++ }
+    netsh wlan add profile "filename=$($f.FullName)" user=all $interfaceArg | Out-Null
+    if ($LASTEXITCODE -eq 0) { $added++ } else { $failedProfiles++ }
   }
   "   restored $added saved network(s)"
+  if ($failedProfiles) {
+    "Windows did not restore $failedProfiles saved network(s). Airdraft kept its recovery files."
+    Stop-Transcript | Out-Null
+    exit 1
+  }
 } else {
-  '   no backup (nekodrop before 0.1.9 kept none)'
+  '   no saved networks to restore on this card'
 }
 
 '5. Network'
-Get-NetAdapter -Name nekodrop -ErrorAction SilentlyContinue | Disable-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue
-Set-Service WlanSvc -StartupType Automatic -ErrorAction SilentlyContinue
-Start-Service WlanSvc -ErrorAction SilentlyContinue
+Get-NetAdapter -Name Airdraft -ErrorAction SilentlyContinue | Where-Object InterfaceDescription -Like 'TAP-Windows Adapter V9*' |
+  Disable-NetAdapter -Confirm:$false -ErrorAction SilentlyContinue
 
-''
-$after = if ($dev) {
-  Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object { $_.InstanceId -eq $dev.InstanceId } | Select-Object -First 1
-}
-if (-not $after -and $dev) {
-  $after = Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue | Where-Object {
-    $pci -and (Get-PciVendorDevice $_.InstanceId) -and (Get-PciVendorDevice $_.InstanceId).Key -eq $pci.Key
-  } | Select-Object -First 1
-}
-if ($after) {
-  $afterPci = Get-PciVendorDevice $after.InstanceId
-  $afterProfile = Get-VendorProfile $(if ($afterPci) { $afterPci.VendorId } else { '' })
-  $service = (Get-PnpDeviceProperty -InstanceId $after.InstanceId -KeyName DEVPKEY_Device_Service -ErrorAction SilentlyContinue).Data
-  "Wi-Fi card: $($after.FriendlyName), driver service $service, status $($after.Status)"
-  if ($service -in $ProxyServices) {
-    if ($afterProfile.VendorId -eq '8086') {
-      'The card is still not on Intel''s driver. Restart the PC; if Wi-Fi is still missing, install Intel''s Wi-Fi driver from intel.com or Windows Update.'
-    } else {
-      "The card is still not on $($afterProfile.Name)'s driver. Restart the PC; if Wi-Fi is still missing, install $($afterProfile.Name)'s Wi-Fi driver from $($afterProfile.DownloadHint)."
+if ($pendingNetwork.IPv4 -or $pendingNetwork.IPv6 -or $pendingNetwork.ProfileName) {
+  $reconnected = $false
+  $ready = $false
+  for ($i = 0; $i -lt 30; $i++) {
+    $adapter = Get-RestoredAdapter $dev.InstanceId
+    if ($adapter) {
+      $ready = $adapter.Status -eq 'Up' -and (!$pendingNetwork.IPv4 -or (Test-NativeIpPath $adapter.ifIndex 'IPv4' '0.0.0.0/0')) -and
+               (!$pendingNetwork.IPv6 -or (Test-NativeIpPath $adapter.ifIndex 'IPv6' '::/0'))
+      if ($ready) { break }
+      if ($i -ge 4 -and !$reconnected -and $pendingNetwork.ProfileName -and $adapter.Status -ne 'Up') {
+        $reconnected = $true
+        netsh wlan connect "name=$($pendingNetwork.ProfileName)" "interface=$($adapter.Name)" | Out-Null
+      }
     }
-  } else {
-    'Done: Windows Wi-Fi is back. A restart is not needed, but does no harm.'
+    Start-Sleep 1
   }
+  if (!$ready) {
+    'The Windows driver is back. Connect to your saved Wi-Fi network, then rerun recovery to verify its previous IP paths.'
+    Stop-Transcript | Out-Null
+    exit 1
+  }
+  '   the native Wi-Fi adapter recovered its previous IP paths'
 }
+$rc = 0
 if ($Uninstall) {
-  $un = Join-Path $env:ProgramFiles 'nekodrop\uninstall.ps1'
-  if (Test-Path $un) { 'Uninstalling nekodrop'; & $un }
+  $un = Join-Path $env:ProgramFiles 'Airdraft\uninstall.ps1'
+  if (Test-Path -LiteralPath $un) { 'Uninstalling Airdraft'; & $un; $rc = $LASTEXITCODE }
 }
 Stop-Transcript | Out-Null
+exit $rc

@@ -2,6 +2,7 @@
 /* khal.h over IwxDevice. Built in the C++-library group (NEKO_KERNEL). */
 #include "plat.h"
 #include "iwx.h"
+#include "iwxreg.h"
 #include "khal.h"
 
 #include <cstring>
@@ -21,7 +22,7 @@ TxRate legacy(unsigned mbps_x2) {
   return r;
 }
 
-void copy_error(char *dst, size_t len, const std::string &src) {
+void copy_string(char *dst, size_t len, const std::string &src) {
   if (!dst || !len) return;
   const size_t n = src.size() < len - 1 ? src.size() : len - 1;
   std::memcpy(dst, src.data(), n);
@@ -41,7 +42,7 @@ bool khal_open(uint8_t channel, const char *country, KhalLogCallback log, char *
   opt.mac_type = IwxDevice::MacType::Listener;
   std::string err;
   if (!g_dev->open(opt, err)) {
-    copy_error(error, error_len, err);
+    copy_string(error, error_len, err);
     delete g_dev;
     g_dev = nullptr;
     return false;
@@ -61,7 +62,7 @@ bool khal_open(uint8_t channel, const char *country, KhalLogCallback log, char *
   addr[0] = static_cast<uint8_t>((addr[0] | 0x02) & 0xfe);
   addr[5] ^= 0x5a;
   if (!g_dev->start_monitor(channel, channel > 14 ? 80 : 20, addr)) {
-    copy_error(error, error_len, "the listener could not start");
+    copy_string(error, error_len, "the listener could not start");
     delete g_dev;
     g_dev = nullptr;
     return false;
@@ -82,6 +83,7 @@ void khal_info(KhalInfo *info) {
   std::memset(info, 0, sizeof(*info));
   if (!g_dev) return;
   std::memcpy(info->hw_address, g_dev->hw_address().data(), 6);
+  copy_string(info->firmware, sizeof(info->firmware), g_dev->firmware_name());
 }
 
 void khal_set_rx(KhalRxCallback cb, void *ctx) {
@@ -92,8 +94,10 @@ void khal_set_rx(KhalRxCallback cb, void *ctx) {
 int khal_poll() { return g_dev ? g_dev->poll() : 0; }
 void khal_check_health() { if (g_dev) g_dev->check_health(); }
 bool khal_healthy() { return g_dev && g_dev->healthy(); }
+bool khal_listener_healthy() { return g_dev && g_dev->listener_healthy(); }
 
 bool khal_set_channel(uint8_t channel, unsigned width_mhz) { return g_dev && g_dev->set_channel(channel, width_mhz); }
+bool khal_retune_listener(uint8_t channel, unsigned width_mhz) { return g_dev && g_dev->retune_listener(channel, width_mhz); }
 uint8_t khal_channel() { return g_dev ? g_dev->channel() : 0; }
 bool khal_set_promiscuous(bool on) { return g_dev && g_dev->set_promiscuous(on); }
 bool khal_set_listener_address(const uint8_t address[6]) { return g_dev && g_dev->set_address(address); }
@@ -109,6 +113,7 @@ static StaParams to_params(const KhalSta *s) {
   std::memcpy(p.addr, s->addr, 6);
   p.channel = s->channel;
   p.width = s->width ? s->width : 20;
+  p.center_channel = s->center_channel;
   p.beacon_int = s->beacon_int ? s->beacon_int : 100;
   p.ht = s->ht;
   p.vht = s->vht;
@@ -120,7 +125,10 @@ bool khal_sta_join(const KhalSta *sta) { return g_dev && g_dev->sta_join(to_para
 
 bool khal_sta_associated(const KhalSta *agreed, uint16_t aid, uint8_t dtim) {
   if (!g_dev) return false;
-  g_dev->sta_join_update(to_params(agreed));
+  auto params = to_params(agreed);
+  if (params.width > 20 && iwx_phy_ctrl_pos(params.channel, params.center_channel, params.width) < 0)
+    params.width = 20;
+  g_dev->sta_join_update(params);
   return g_dev->sta_associated(aid, dtim);
 }
 

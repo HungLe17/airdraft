@@ -2,7 +2,7 @@
 # default, -Clang for clang-cl), copies the firmware of every card it knows
 # (iwxradio/src/cards.h: Qu/QuZ hr+jf, cc, so, ty, with their PNVMs) beside it
 # and runs the self-test.
-param([switch]$Clang)
+param([switch]$Clang, [switch]$StageOnly)
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\toolchain.ps1"
 $repo = Split-Path $PSScriptRoot -Parent
@@ -16,7 +16,8 @@ $build = "$repo\build\iwxradio"
 & $tools.CMake -S "$repo\iwxradio" -B $build -G Ninja "-DCMAKE_MAKE_PROGRAM=$($tools.Ninja)" `
   "-DCMAKE_CXX_COMPILER=$compiler" -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
-& $tools.CMake --build $build
+$targets = if ($StageOnly) { @('--target', 'winawdl_radio') } else { @() }
+& $tools.CMake --build $build @targets
 if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
 
 $fwSource = "$repo\third_party\ForbiddenItlwm\itlwm\firmware"
@@ -27,6 +28,8 @@ foreach ($f in 'iwlwifi-Qu*-68.ucode', 'iwlwifi-cc-a0-68.ucode', 'iwlwifi-so-a0-
 }
 Copy-Item "$repo\third_party\ForbiddenItlwm\iwlwifi-firmware-license" "$fwDest\LICENSE.iwlwifi-firmware" -Force
 
-& "$build\iwx_selftest.exe" $fwDest
-if ($LASTEXITCODE -ne 0) { throw 'self-test failed' }
+if (!$StageOnly) {
+  & "$build\iwx_selftest.exe" $fwDest
+  if ($LASTEXITCODE -ne 0) { throw 'self-test failed' }
+}
 Get-ChildItem $build -Filter *.exe | Select-Object Name, Length

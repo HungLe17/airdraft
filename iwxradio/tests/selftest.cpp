@@ -20,6 +20,15 @@
 
 static int failures = 0;
 
+static_assert(iwx_phy_ctrl_pos(100, 106, 80) == IWX_PHY_VHT_CTRL_POS_2_BELOW);
+static_assert(iwx_phy_ctrl_pos(104, 106, 80) == IWX_PHY_VHT_CTRL_POS_1_BELOW);
+static_assert(iwx_phy_ctrl_pos(108, 106, 80) == IWX_PHY_VHT_CTRL_POS_1_ABOVE);
+static_assert(iwx_phy_ctrl_pos(112, 106, 80) == IWX_PHY_VHT_CTRL_POS_2_ABOVE);
+static_assert(iwx_phy_ctrl_pos(6, 8, 40) == IWX_PHY_VHT_CTRL_POS_1_BELOW);
+static_assert(iwx_phy_ctrl_pos(6, 4, 40) == IWX_PHY_VHT_CTRL_POS_1_ABOVE);
+static_assert(iwx_phy_ctrl_pos(100, 106, 40) == -1);
+static_assert(iwx_phy_ctrl_pos(100, 0, 80) == -1);
+
 #define EXPECT_SIZE(type, n)                                                            \
   do {                                                                                  \
     if (sizeof(type) != (n)) {                                                          \

@@ -435,11 +435,21 @@ void NekoConnectOnFrame(NEKO_DEVICE *dev, const KhalRx *f) {
     agreed.beacon_int = dev->ConnBeaconInt;
     agreed.ht = dev->ConnHt && NekoFindIe(ies, iesLength, 45, &l);
     agreed.vht = dev->ConnVht && NekoFindIe(ies, iesLength, 191, &l);
+    agreed.width = 20;
     const UCHAR *htop = NekoFindIe(ies, iesLength, 61, &l);
-    const bool wide40 = htop && l >= 2 && (htop[1] & 0x04);
+    if (agreed.ht && htop && l >= 2 && htop[0] == agreed.channel && (htop[1] & 0x04)) {
+      const UCHAR secondary = htop[1] & 3;
+      const int center = secondary == 1 ? agreed.channel + 2 : secondary == 3 ? agreed.channel - 2 : 0;
+      if (center > 0 && center <= 255) {
+        agreed.width = 40;
+        agreed.center_channel = static_cast<UCHAR>(center);
+      }
+    }
     const UCHAR *vhtop = NekoFindIe(ies, iesLength, 192, &l);
-    const bool wide80 = agreed.vht && vhtop && l >= 1 && vhtop[0] >= 1;
-    agreed.width = wide80 ? 80 : wide40 ? 40 : 20;
+    if (agreed.vht && agreed.channel > 14 && vhtop && l >= 5 && vhtop[0] == 1 && vhtop[1]) {
+      agreed.width = 80;
+      agreed.center_channel = vhtop[1];
+    }
     agreed.mimo = true;
     const UCHAR *tim = NekoFindIe(dev->ConnBeacon + 12, dev->ConnBeaconLength - 12u, 5, &l);
     const UCHAR dtim = tim && l >= 2 ? tim[1] : 1;

@@ -335,7 +335,7 @@ void WifiStation::learn_beacon(const uint8_t *f, size_t len) {
   _ap_pairwise_ccmp = _ap_bip_cmac = true;
   _ap_mfpc = _ap_mfpr = _ap_h2e_only = false;
   _ap_akms = 0;
-  _ap_width = 20;
+  _ap_center40 = _ap_center80 = 0;
   _ap_rates.clear();
   for (size_t i = 36; i + 2 <= len;) {
     const uint8_t id = f[i], n = f[i + 1];
@@ -372,15 +372,19 @@ void WifiStation::learn_beacon(const uint8_t *f, size_t len) {
     } else if (id == 45 && n >= 26) {
       _ap_ht = true;
       _ap_2ss = v[4] != 0; /* MCS 8-15 supported */
-    } else if (id == 61 && n >= 2) {
-      if (v[1] & 0x03) _ap_width = 40; /* secondary channel offset */
+    } else if (id == 61 && n >= 2 && v[0] == _cfg.channel) {
+      const auto secondary = v[1] & 0x03;
+      const int center = secondary == 1 ? v[0] + 2 : secondary == 3 ? v[0] - 2 : 0;
+      if (center > 0 && center <= 255 && iwx_phy_ctrl_pos(v[0], static_cast<uint8_t>(center), 40) >= 0)
+        _ap_center40 = static_cast<uint8_t>(center);
     } else if (id == 191 && n >= 12) {
       _ap_vht = true;
-    } else if (id == 192 && n >= 1) {
-      if (v[0] >= 1) _ap_width = 80;
+    } else if (id == 192 && n >= 5 && v[0] == 1 && _cfg.channel > 14) {
+      if (iwx_phy_ctrl_pos(_cfg.channel, v[1], 80) >= 0) _ap_center80 = v[1];
     }
     i += 2 + n;
   }
+  _ap_width = _ap_center80 ? 80 : _ap_center40 ? 40 : 20;
   for (uint8_t r : _ap_rates)
     if (r == 0xfb) _ap_h2e_only = true; /* BSS membership selector 123: SAE hash-to-element only */
   if (!_beacon_seen) {
@@ -604,13 +608,20 @@ void WifiStation::handle_mgmt(const RxFrame &in) {
       if (!peer_x || !_owe.derive(peer_x)) return fail("Enhanced Open: the access point's key exchange is missing or invalid");
       std::memcpy(_pmk, _owe.pmk(), 32);
     }
-    unsigned width = 20;
-    if (_ap_ht && _ap_width >= 40) width = std::min(_ap_width, _cfg.max_width);
     StaParams p = _dev.sta_params();
     p.ht = _ap_ht;
     p.vht = _ap_vht && _cfg.channel > 14;
     p.mimo = _ap_2ss;
-    p.width = width;
+    if (p.ht && p.vht && _ap_center80 && _cfg.max_width >= 80) {
+      p.width = 80;
+      p.center_channel = _ap_center80;
+    } else if (p.ht && _ap_center40 && _cfg.max_width >= 40) {
+      p.width = 40;
+      p.center_channel = _ap_center40;
+    } else {
+      p.width = 20;
+      p.center_channel = 0;
+    }
     p.beacon_int = _beacon_int;
     _dev.sta_join_update(p);
     if (!_dev.sta_associated(aid, _dtim)) return fail("the firmware refused the association");

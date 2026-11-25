@@ -359,7 +359,8 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  Mailbox inbox;
+  auto command_inbox = std::make_shared<Mailbox>();
+  auto &inbox = *command_inbox;
   std::atomic<bool> ready{false}, failed{false};
   std::atomic<bool> client_connected{false};
   uint8_t bssid_filter[6] = {};
@@ -367,12 +368,13 @@ int main(int argc, char **argv) {
   std::mutex filter_mutex;
 
   /* The device thread owns the card: bring-up, receive polling, sending. */
-  /* The service asks for Wi-Fi scans on stdin. */
-  std::thread stdin_thread([&] {
+  /* The service sends Wi-Fi commands here and closes its end to release the radio. */
+  const bool supervised = GetEnvironmentVariableW(L"AIRDRAFT_SUPERVISED_RADIO", nullptr, 0) != 0;
+  std::thread([command_inbox, supervised] {
     char line[128];
     while (!stopping() && std::fgets(line, sizeof(line), stdin)) {
       if (std::strncmp(line, "rejoin", 6) == 0) {
-        inbox.push({kRejoinRequest, {}});
+        command_inbox->push({kRejoinRequest, {}});
         continue;
       }
       if (std::strncmp(line, "scan", 4) != 0) continue;
@@ -385,12 +387,13 @@ int main(int argc, char **argv) {
         if (ssid.size() < 32) ssid.push_back(static_cast<uint8_t>(std::strtoul(b, nullptr, 16)));
         h += 2;
       }
-      inbox.push({kScanRequest, ssid});
+      command_inbox->push({kScanRequest, ssid});
     }
-  });
-  stdin_thread.detach();
+    if (supervised) g_stop = true;
+  }).detach();
 
   std::thread device_thread([&] {
+    if (stopping()) return;
     if (opt.no_card) {
       ready = true;
       log_line("test mode: no card; counting what the client sends");
@@ -1601,11 +1604,11 @@ int main(int argc, char **argv) {
         }
       }
     }
-    if (sta) sta->stop();
     if (tap_thread.joinable()) {
       g_stop = true;
       tap_thread.join();
     }
+    if (sta) sta->stop();
     if (!dev.healthy()) log_line("the card stopped answering or the firmware failed");
     dev.stop();
     };

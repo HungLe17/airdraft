@@ -26,3 +26,16 @@ struct iwx_rx_transfer_desc {
 #pragma pack(pop)
 #pragma warning(pop)
 #endif
+
+/* The Intel command encodes the primary channel's offset from the center. */
+constexpr int iwx_phy_ctrl_pos(uint8_t primary, uint8_t center, unsigned width) {
+  const int offset = int(primary) - int(center);
+  if (center == 0) return -1;
+  switch (offset) {
+  case -6: return width == 80 ? IWX_PHY_VHT_CTRL_POS_2_BELOW : -1;
+  case -2: return width == 40 || width == 80 ? IWX_PHY_VHT_CTRL_POS_1_BELOW : -1;
+  case  2: return width == 40 || width == 80 ? IWX_PHY_VHT_CTRL_POS_1_ABOVE : -1;
+  case  6: return width == 80 ? IWX_PHY_VHT_CTRL_POS_2_ABOVE : -1;
+  default: return -1;
+  }
+}

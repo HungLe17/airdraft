@@ -1,10 +1,10 @@
 ; SPDX-License-Identifier: MIT
-; User-mode register proxy for the Wi-Fi cards nekodrop's radios drive:
+; User-mode register proxy for the Wi-Fi cards Airdraft's radios drive:
 ; Intel AX201 and 9560-class on Qu/QuZ, AX200, and the AX210 family
 ; (AX210/AX211/AX411), plus Realtek RTL8852CE (10EC:C852).
 ; Adapted from winawdl's RTL8852CE proxy. Matches only the generic device IDs
 ; (no SUBSYS), which rank below the vendors' own drivers, so adding it takes
-; over nothing: NekoDropService (or scripts\take-card.ps1) binds it explicitly.
+; over nothing: AirdraftRadioService (or scripts\take-card.ps1) binds it explicitly.
 
 [Version]
 Signature   = "$Windows NT$"
@@ -96,7 +96,7 @@ ServiceBinary      = %13%\winawdl_regproxy.dll
 [Strings]
 Provider   = "winairdrop project"
 ClassName  = "winawdl user-space radios"
-DeviceDesc = "Intel Wi-Fi user-space register proxy (nekodrop)"
-DeviceDescRtl = "Realtek RTL8852CE user-space register proxy (nekodrop)"
+DeviceDesc = "Intel Wi-Fi user-space register proxy (Airdraft)"
+DeviceDescRtl = "Realtek RTL8852CE user-space register proxy (Airdraft)"
 DiskName   = "winawdl register proxy"
 WudfRdDisplayName = "Windows Driver Foundation - User-mode Driver Framework Reflector"

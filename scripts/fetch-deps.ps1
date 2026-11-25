@@ -1,10 +1,12 @@
 # Fetches what the build needs into third_party\ (not in this repository):
 #   winawdl         radio pipe, RTL8852CE radio, awdld (OWL), Wintun, AirDrop engine (MIT/GPL-2.0/GPL-3.0)
-#   devourer        winawdl's Realtek RTL8852CE user-mode radio library (GPL-2.0)
+#   orchard-devourer  optional experimental Realtek PCIe radio source (GPL-2.0)
 #   ForbiddenItlwm  iwlwifi firmware and its licence (GPL-2.0 / Intel redistribution)
 #   winlibs MinGW   GCC for awdld
 #   WDK (NuGet)     UMDF headers and tools, only when no WDK is installed
-# Pinned to the versions nekodrop is tested with; the downloads are checked by SHA-256.
+# Dependency versions are pinned. Downloads with a recorded SHA-256 are verified.
+param([switch]$ExperimentalRealtek, [switch]$RealtekRadioOnly)
+
 $ErrorActionPreference = 'Stop'
 $tp = Join-Path (Split-Path $PSScriptRoot -Parent) 'third_party'
 New-Item -ItemType Directory -Force $tp | Out-Null
@@ -25,8 +27,15 @@ function Get-File($url, $out, $sha256) {
 }
 
 Get-Repo winawdl https://github.com/raph559/winawdl.git 0db7031589dc2bca03c0893db341176376962047
-Get-Repo 'winawdl\upstream\devourer' https://github.com/raph559/devourer.git 8d936de2a3805ce126e5236349afe40e645aaf9b
+if ($ExperimentalRealtek -or $RealtekRadioOnly) {
+  Get-Repo orchard-devourer https://github.com/orchard-win/orchard-devourer.git 4f6d1e93fdd002aba08d028a803372cb706fa9ec
+}
+if ($RealtekRadioOnly) { return }
 Get-Repo ForbiddenItlwm https://github.com/retropineaple/ForbiddenItlwm.git 96ff71e0211789239f6fbf6b64ac8e7fd22b41aa
+Get-Repo tap-windows6 https://github.com/OpenVPN/tap-windows6.git eb764efe1579dc0d9d64a64186b16491af37de88
+
+git -C "$tp\winawdl" submodule update --init --recursive upstream/owl
+if ($LASTEXITCODE) { throw 'Could not fetch the pinned OWL and radiotap submodules.' }
 
 # Wintun for awdld: winawdl's script checks its SHA-256 and WireGuard's signature.
 if (-not (Test-Path "$tp\winawdl\deps\wintun\wintun.dll")) {

@@ -48,9 +48,11 @@ void khal_set_rx(KhalRxCallback cb, void *ctx);
 int khal_poll();
 void khal_check_health();
 bool khal_healthy();
+bool khal_listener_healthy();
 
 /* Listener (scan, AWDL) */
 bool khal_set_channel(uint8_t channel, unsigned width_mhz);
+bool khal_retune_listener(uint8_t channel, unsigned width_mhz);
 uint8_t khal_channel();
 bool khal_set_promiscuous(bool on);
 bool khal_set_listener_address(const uint8_t address[6]);
@@ -85,6 +87,7 @@ struct KhalSta {
   uint8_t bssid[6];
   uint8_t addr[6];
   uint8_t channel;
+  uint8_t center_channel;
   unsigned width;
   uint16_t beacon_int;
   bool ht, vht, mimo;

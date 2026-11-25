@@ -1,7 +1,7 @@
 # Builds winawdl's AWDL daemon (awdld.exe, OWL on Windows) with MinGW-w64 GCC,
 # into third_party\winawdl\build\awdl. OWL is GNU C, which MSVC does not take.
 # -MinGW is the bin directory of a MinGW-w64 GCC (WinLibs or Strawberry).
-param([string]$MinGW = '')
+param([string]$MinGW = '', [switch]$StageOnly)
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\toolchain.ps1"
 $repo = Split-Path $PSScriptRoot -Parent
@@ -23,7 +23,8 @@ $make = if (Test-Path "$MinGW\mingw32-make.exe") { "$MinGW\mingw32-make.exe" } e
 & $tools.CMake -S "$winawdl\awdl" -B $build -G 'MinGW Makefiles' "-DCMAKE_C_COMPILER=$MinGW\gcc.exe" `
   "-DCMAKE_MAKE_PROGRAM=$make" -DCMAKE_BUILD_TYPE=Release
 if ($LASTEXITCODE -ne 0) { throw "cmake configure failed ($LASTEXITCODE)" }
-& $tools.CMake --build $build
+$targets = if ($StageOnly) { @('--target', 'awdld') } else { @() }
+& $tools.CMake --build $build @targets
 if ($LASTEXITCODE -ne 0) { throw "build failed ($LASTEXITCODE)" }
 
 $wintun = "$winawdl\deps\wintun\wintun.dll"

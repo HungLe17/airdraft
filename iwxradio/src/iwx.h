@@ -39,6 +39,7 @@ struct StaParams {
   uint8_t bssid[6];
   uint8_t addr[6];      /* our address: the TAP adapter's */
   uint8_t channel;
+  uint8_t center_channel = 0;
   unsigned width = 20;  /* PHY width while associated */
   uint16_t beacon_int = 100;
   bool ht = false, vht = false, mimo = false;
@@ -65,6 +66,8 @@ public:
    * MAC the listener answers to; it can change later. */
   bool start_monitor(uint8_t channel, unsigned width_mhz, const uint8_t address[6]);
   bool set_channel(uint8_t channel, unsigned width_mhz);
+  bool retune_listener(uint8_t channel, unsigned width_mhz);
+  bool listener_healthy() const { return _queue_enabled && !_listener_failed && healthy(); }
   bool set_address(const uint8_t address[6]);
   /* A Block Ack receive session with `peer` (ForbiddenItlwm's awdlBaHandle):
    * a firmware station for the peer, bound to the listener, and an immediate
@@ -138,6 +141,7 @@ public:
     _sta.vht = p.vht;
     _sta.mimo = p.mimo;
     _sta.width = p.width;
+    _sta.center_channel = p.center_channel;
     _sta.beacon_int = p.beacon_int;
   }
   bool sta_set_key(bool group, unsigned key_index, const uint8_t key[16]);
@@ -185,6 +189,7 @@ public:
   void set_rx_handler(RxHandler handler) { _on_rx = std::move(handler); }
   const TxStats &tx_stats() const { return _tx_stats; }
   uint8_t channel() const { return _channel; }
+  const std::string &firmware_name() const { return _fw_name; }
   unsigned width_mhz() const { return _width; }
   bool healthy() const { return _open && !_fw_error && !_proxy.failed(); }
   const std::array<uint8_t, 6> &hw_address() const { return _hw_addr; }
@@ -262,7 +267,9 @@ private:
   void handle_tx_resp(const uint8_t *payload, size_t len, unsigned slot);
   int transmit_on(TxRing &ring, const uint8_t *frame, size_t len, const TxRate &rate, bool encrypt,
                   bool kick = true);
-  int phy_cmd(unsigned id, uint8_t channel, unsigned width, uint32_t action);
+  int phy_cmd(unsigned id, uint8_t channel, unsigned width, uint32_t action, uint8_t center_channel = 0);
+  bool configure_monitor(uint8_t channel, unsigned width, const uint8_t address[6], bool initialize_shared);
+  int remove_listener_station(uint8_t station_id, bool flush);
   int binding_for(unsigned id, unsigned phy, const uint32_t *macs, unsigned nmacs, uint8_t channel,
                   uint32_t action);
   int sta_mac_cmd(uint32_t action, bool assoc);
@@ -336,6 +343,7 @@ private:
   /* Monitor state */
   bool _phy_added = false, _mac_added = false, _binding_added = false,
        _sta_added = false, _queue_enabled = false;
+  bool _listener_failed = false;
   uint8_t _channel = 0;
   unsigned _width = 20;
   std::array<uint8_t, 6> _address{};

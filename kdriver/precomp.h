@@ -138,7 +138,7 @@ WDF_DECLARE_CONTEXT_TYPE_WITH_NAME(NEKO_DEVICE, NekoGetDevice);
 void NekoInitQueues(NEKO_DEVICE *dev);
 NTSTATUS NekoHwPrepare(NEKO_DEVICE *dev, WDFCMRESLIST translated);
 void NekoHwRelease(NEKO_DEVICE *dev);
-NTSTATUS NekoSetCapabilities(NEKO_DEVICE *dev);
+NTSTATUS NekoSetCapabilities(NEKO_DEVICE *dev, const KhalInfo &info);
 void NekoKick(NEKO_DEVICE *dev);
 void NekoQueueTx(NEKO_DEVICE *dev, NEKO_FRAME *f);
 void NekoQueueRx(NEKO_DEVICE *dev, NEKO_FRAME *f);

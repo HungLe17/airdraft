@@ -1,4 +1,4 @@
-# Builds the installer on a clean Windows machine with scripts\build-installer.ps1.
+# Builds Airdraft on a clean Windows machine with build.ps1.
 # The result is uploaded as a workflow artifact; publishing a release stays a
 # separate, deliberate step.
 name: build
@@ -18,17 +18,13 @@ jobs:
           dotnet-version: '8.0.x'
       - name: Inno Setup
         run: choco install innosetup --no-progress -y
-      - name: Fetch dependencies
-        shell: pwsh
-        run: .\scripts\fetch-deps.ps1
       - name: Build
         shell: pwsh
-        run: .\scripts\build-installer.ps1
-      - name: SHA-256
-        shell: pwsh
-        run: Get-ChildItem build\nekodrop-*-setup.exe | Get-FileHash -Algorithm SHA256 | Format-List
+        run: .\build.ps1
       - uses: actions/upload-artifact@v4
         with:
           name: installer
-          path: build/nekodrop-*-setup.exe
+          path: |
+            build/Airdraft-*-Developer-Preview-*
+            build/SHA256SUMS.txt
           if-no-files-found: error

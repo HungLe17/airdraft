@@ -3,7 +3,7 @@
  * What Windows is told the adapter can do. WiFiCx takes these during
  * PrepareHardware (it no longer asks with WDI_GET_ADAPTER_CAPABILITIES).
  *
- * AX201: 2x2, 2.4 and 5 GHz, 802.11ax silicon; the station side of this
+ * AX201 and AX210 are 2x2. The station side of this
  * driver negotiates up to VHT (802.11ac), so that is what is reported.
  * Security: open, WPA2 (personal and enterprise) and WPA3-Personal (SAE, run
  * by Windows through WDI_SET_SAE_AUTH_PARAMS) with 802.11w; Windows runs the
@@ -22,12 +22,13 @@ static const WDI_CHANNEL_MAPPING_ENTRY kChannels5[] = {
     {153, 5765}, {157, 5785}, {161, 5805}, {165, 5825},
 };
 
-NTSTATUS NekoSetCapabilities(NEKO_DEVICE *dev) {
+NTSTATUS NekoSetCapabilities(NEKO_DEVICE *dev, const KhalInfo &info) {
   WIFI_DEVICE_CAPABILITIES device;
   WIFI_DEVICE_CAPABILITIES_INIT(&device);
   device.HardwareRadioState = TRUE;
   device.SoftwareRadioState = TRUE;
-  RtlCopyMemory(device.FirmwareVersion, "iwlwifi-QuZ 68 (nekodrop)", sizeof("iwlwifi-QuZ 68 (nekodrop)"));
+  static_assert(sizeof(device.FirmwareVersion) >= sizeof(info.firmware));
+  RtlCopyMemory(device.FirmwareVersion, info.firmware, sizeof(info.firmware));
   device.ActionFramesSupported = FALSE;
   device.NumRxStreams = 2;
   device.NumTxStreams = 2;

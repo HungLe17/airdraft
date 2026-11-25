@@ -3,16 +3,16 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 
-namespace NekoDrop.Service;
+namespace Airdraft.Service;
 
 /// <summary>
 /// Keeps Windows' saved Wi-Fi networks across the card changing hands.
-/// Windows files them per WLAN interface; while nekodrop holds the card there
+/// Windows files them per WLAN interface; while Airdraft holds the card there
 /// is none, and when Intel's driver comes back the interface can get a new
 /// GUID, which leaves every saved network behind under the old one.
 ///
 /// Before the card is taken, the all-user profiles are copied to
-/// %ProgramData%\nekodrop\wlan-backup (SYSTEM and Administrators only). Keys
+/// %ProgramData%\Airdraft\wlan-backup (SYSTEM and Administrators only). Keys
 /// stay as Windows keeps them (protected=true, encrypted for this machine):
 /// the backup is no easier to read than Windows' own store. Once Intel's
 /// interface is back, every backed-up profile it does not have is added
@@ -25,7 +25,8 @@ public static class WlanBackup
     /// <summary>The boot restore, a give-back and a take can overlap.</summary>
     static readonly object Gate = new();
 
-    static string Dir => Path.Combine(ServiceConfig.Folder, "wlan-backup");
+    static string Dir => Path.Combine(ServiceConfig.Folder,
+        CardCatalog.ExperimentalBuild ? "wlan-backup-rtl8852be" : "wlan-backup");
     static string IndexPath => Path.Combine(Dir, "index.json");
 
     /// <summary>Windows' own profile store, one folder per interface GUID.</summary>
@@ -36,25 +37,24 @@ public static class WlanBackup
     sealed record Index(string Interface, List<string> Profiles);
 
     /// <summary>
-    /// Copies the all-user profiles of the WLAN interface (call while Intel's
-    /// driver has the card). Profiles that disappeared from the same interface
+    /// Copies the all-user profiles of the selected adapter's WLAN interface
+    /// while the vendor driver has the card. Profiles that disappeared from the same interface
     /// were deleted by the user and leave the backup too; with a different
     /// interface GUID nothing is dropped, since that is the loss being guarded
     /// against. Returns the number of profiles in the backup.
     /// </summary>
-    public static int Save(Action<string> say)
+    public static int Save(Action<string> say, Guid interfaceId)
     {
-        lock (Gate) return SaveLocked(say);
+        lock (Gate) return SaveLocked(say, interfaceId);
     }
 
-    static int SaveLocked(Action<string> say)
+    static int SaveLocked(Action<string> say, Guid interfaceId)
     {
         if (!Open(out var h)) return -1;
         try
         {
-            var guid = FirstInterface(h);
-            if (guid is null) return -1;
-            var g = guid.Value;
+            if (!Interfaces(h).Contains(interfaceId)) return -1;
+            var g = interfaceId;
             var current = new Dictionary<string, string>();
             foreach (var (name, flags) in ProfileNames(h, g))
             {
@@ -62,8 +62,14 @@ public static class WlanBackup
                 // can only be read and written in that user's session.
                 if ((flags & (WLAN_PROFILE_GROUP_POLICY | WLAN_PROFILE_USER)) != 0) continue;
                 uint f = 0; /* keys stay encrypted (protected=true) */
-                if (WlanGetProfile(h, ref g, name, IntPtr.Zero, out var xmlPtr, ref f, out _) != 0) continue;
-                try { current[name] = Marshal.PtrToStringUni(xmlPtr) ?? ""; }
+                var error = WlanGetProfile(h, ref g, name, IntPtr.Zero, out var xmlPtr, ref f, out _);
+                if (error != 0) throw new IOException($"Windows could not read a saved Wi-Fi profile (error {error})");
+                try
+                {
+                    var xml = Marshal.PtrToStringUni(xmlPtr);
+                    if (string.IsNullOrEmpty(xml)) throw new IOException("Windows returned an empty Wi-Fi profile");
+                    current[name] = xml;
+                }
                 finally { WlanFreeMemory(xmlPtr); }
             }
 
@@ -100,21 +106,22 @@ public static class WlanBackup
 
     /// <summary>
     /// Adds back every backed-up profile (and every profile stranded in another
-    /// interface's folder) that the current WLAN interface lacks. Waits up to
-    /// `wait` for Intel's interface to appear. Returns the number added.
+    /// interface's folder) that the selected WLAN interface lacks. Re-resolves
+    /// the interface after a driver bind because Windows may assign a new GUID.
+    /// Returns the number added.
     /// </summary>
-    public static int Restore(Action<string> say, TimeSpan wait)
+    public static int Restore(Action<string> say, TimeSpan wait, Func<Guid?> resolveInterface)
     {
         try
         {
             var end = DateTime.UtcNow + wait;
             while (true)
             {
-                if (Open(out var h))
+                if (resolveInterface() is { } g && Open(out var h))
                 {
                     try
                     {
-                        if (FirstInterface(h) is { } g) lock (Gate) return RestoreTo(h, g, say);
+                        if (Interfaces(h).Contains(g)) lock (Gate) return RestoreTo(h, g, say);
                     }
                     finally { WlanCloseHandle(h, IntPtr.Zero); }
                 }
@@ -146,14 +153,14 @@ public static class WlanBackup
             }
         // Profiles stranded under an interface that is no longer there (lost
         // before this backup existed, or by a card re-detected outside
-        // nekodrop). Each such folder is taken in once, so a network the user
+        // Airdraft). Each such folder is taken in once, so a network the user
         // deletes afterwards stays deleted.
         var present = Interfaces(h);
         var done = LoadDone();
         var newlyDone = new List<string>();
         try
         {
-            if (Directory.Exists(WindowsStore))
+            if (!CardCatalog.ExperimentalBuild && Directory.Exists(WindowsStore))
                 foreach (var dir in Directory.GetDirectories(WindowsStore))
                 {
                     if (!Guid.TryParse(Path.GetFileName(dir), out var other) || present.Contains(other)) continue;
@@ -270,17 +277,11 @@ public static class WlanBackup
 
     static bool Open(out IntPtr h) => WlanOpenHandle(2, IntPtr.Zero, out _, out h) == 0;
 
-    static Guid? FirstInterface(IntPtr h)
-    {
-        if (WlanEnumInterfaces(h, IntPtr.Zero, out var list) != 0) return null;
-        try { return Marshal.ReadInt32(list) == 0 ? null : Marshal.PtrToStructure<Guid>(list + 8); }
-        finally { WlanFreeMemory(list); }
-    }
-
     static List<(string Name, uint Flags)> ProfileNames(IntPtr h, Guid guid)
     {
         var result = new List<(string, uint)>();
-        if (WlanGetProfileList(h, ref guid, IntPtr.Zero, out var list) != 0) return result;
+        var error = WlanGetProfileList(h, ref guid, IntPtr.Zero, out var list);
+        if (error != 0) throw new IOException($"Windows could not list saved Wi-Fi profiles (error {error})");
         try
         {
             // WLAN_PROFILE_INFO_LIST: count, index, then WCHAR[256] + flags (516 bytes) each.

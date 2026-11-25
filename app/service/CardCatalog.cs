@@ -1,17 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-only
-namespace NekoDrop.Service;
+namespace Airdraft.Service;
 
 /// <summary>Which user-mode radio drives a card family.</summary>
 public enum RadioBackendKind
 {
-    /// <summary>nekodrop-radio: the Intel 22000 / AX210 driver ported from ForbiddenItlwm (iwxradio).</summary>
+    /// <summary>airdraft-radio: the Intel 22000 / AX210 driver ported from ForbiddenItlwm (iwxradio).</summary>
     Iwx,
     /// <summary>winawdl's devourer (Realtek RTL8852CE): monitor and inject only, no station.</summary>
     Devourer,
+    /// <summary>Orchard's experimental RTL8852BE PCIe radio.</summary>
+    Devourer8852be,
 }
 
 /// <summary>
-/// What a card family can do in nekodrop. The service asks these instead of
+/// What a card family can do in Airdraft. The service asks these instead of
 /// assuming Intel, so a card that cannot keep Wi-Fi beside AirDrop (no station
 /// in its radio) runs on demand, and radio options it lacks are never passed.
 /// </summary>
@@ -24,14 +26,14 @@ public sealed record AdapterCapabilities(bool SupportsConcurrentWifi, bool Suppo
                                          bool SupportsKernelDriver, uint MinBarBytes)
 {
     /// <summary>
-    /// The Intel cards nekodrop runs today. Also what the service assumes before
+    /// The Intel cards Airdraft runs today. Also what the service assumes before
     /// it has seen a card, so a missing or unreadable card behaves as before.
     /// </summary>
     public static readonly AdapterCapabilities IntelDefault = new(true, true, true, true, 0x2000);
 }
 
 /// <summary>
-/// One PCI device nekodrop knows: who makes it, which radio drives it, what it
+/// One PCI device Airdraft knows: who makes it, which radio drives it, what it
 /// can do, which register-proxy INF takes it, and how the vendor's own driver
 /// is told apart from the proxy when the card is given back.
 /// </summary>
@@ -60,7 +62,7 @@ public sealed record AdapterProfile(string VendorId, string DeviceId, string Ven
 
 /// <summary>
 /// The service's single list of Wi-Fi cards and what each can do. Pure data and
-/// logic (no SetupAPI, registry or files), so `NekoDropService --selftest` checks
+/// logic (no SetupAPI, registry or files), so `AirdraftRadioService --selftest` checks
 /// it on a build machine without a card or administrator rights.
 ///
 /// Keep the active Intel IDs in step with `kDeviceIds` in iwxradio/src/cards.h,
@@ -69,7 +71,7 @@ public sealed record AdapterProfile(string VendorId, string DeviceId, string Ven
 /// </summary>
 public static class CardCatalog
 {
-    // nekodrop's one register proxy (driver/regproxy): selects the largest
+    // Airdraft's one register proxy (driver/regproxy): selects the largest
     // memory BAR (>= 8 KiB) so it covers both Intel (8 KiB BAR0) and
     // Realtek RTL8852CE (1 MiB BAR2).
     const string ProxyInf = "winawdl_regproxy.inf";
@@ -81,6 +83,18 @@ public static class CardCatalog
     static AdapterProfile Intel(string device, string family) =>
         new("8086", device, "Intel", family, RadioBackendKind.Iwx, AdapterCapabilities.IntelDefault,
             ProxyInf, ProxyService, ProxyProvider, IntelProviders, Active: true);
+
+    static readonly AdapterProfile Rtl8852be = new("10EC", "B852", "Realtek", "RTL8852BE",
+        RadioBackendKind.Devourer8852be, new(false, false, false, false, 0x10000),
+        ProxyInf, ProxyService, ProxyProvider, ["Realtek"], Active: false);
+    static readonly AdapterProfile Rtl8852beAlternate = Rtl8852be with { DeviceId = "B85B" };
+
+    internal static bool ExperimentalBuild { get; } =
+#if AIRDRAFT_RTL8852BE
+        true;
+#else
+        File.Exists(Path.Combine(AppContext.BaseDirectory, "RTL8852BE.experimental"));
+#endif
 
     /// <summary>Every card listed, taken or not.</summary>
     public static readonly IReadOnlyList<AdapterProfile> AllProfiles =
@@ -96,16 +110,29 @@ public static class CardCatalog
         Intel("7AF0", "AX210 / AX211 / AX411"), Intel("51F0", "AX210 / AX211 / AX411"),
         Intel("51F1", "AX210 / AX211 / AX411"), Intel("54F0", "AX210 / AX211 / AX411"),
         Intel("7F70", "AX210 / AX211 / AX411"),
-        // Built-in on-demand backend (winawdl's devourer, nekodrop-radio-rtl.exe):
+        // Built-in on-demand backend (winawdl's devourer, airdraft-radio-rtl.exe):
         // monitor and inject only (no station, so Concurrent runs OnDemand), and
         // its registers sit in a 1 MiB BAR (>= 64 KiB).
         new AdapterProfile("10EC", "C852", "Realtek", "RTL8852CE", RadioBackendKind.Devourer,
             new AdapterCapabilities(false, false, false, false, 0x10000),
             ProxyInf, ProxyService, ProxyProvider, ["Realtek"], Active: true),
+        Rtl8852be,
+        Rtl8852beAlternate,
     ];
 
     /// <summary>The cards the service takes.</summary>
     public static readonly IReadOnlyList<AdapterProfile> ActiveProfiles = AllProfiles.Where(p => p.Active).ToArray();
+
+    internal static AdapterProfile PreviewProfile { get; } = ExperimentalBuild
+        ? Rtl8852be : ActiveProfiles.Single(p => p.VendorId == "8086" && p.DeviceId == "2725");
+
+    internal static AdapterProfile? MatchPreview(string instanceId)
+    {
+        var profile = Classify(instanceId);
+        return ExperimentalBuild
+            ? profile?.Backend == RadioBackendKind.Devourer8852be ? profile : null
+            : profile == PreviewProfile ? profile : null;
+    }
 
     /// <summary>
     /// Reads the vendor and device IDs from a PnP instance or hardware ID
@@ -149,6 +176,10 @@ public static class CardCatalog
     /// </summary>
     public static NetMode EffectiveMode(NetMode requested, AdapterCapabilities caps) =>
         requested == NetMode.Concurrent && !caps.SupportsConcurrentWifi ? NetMode.OnDemand : requested;
+
+    internal static int InitialRadioChannel(AdapterProfile profile, int startChannel, int rememberedPeerChannel) =>
+        profile.Backend != RadioBackendKind.Devourer8852be && rememberedPeerChannel is (44 or 149)
+            ? rememberedPeerChannel : startChannel;
 
     /// <summary>Executable name under radio\ and arguments for launching a card's radio daemon.</summary>
     public sealed record RadioLaunch(string ExeName, IReadOnlyList<string> Args);
@@ -222,6 +253,25 @@ public static class CardCatalog
         string[] intel = ["43F0", "A0F0", "02F0", "06F0", "34F0", "3DF0", "4DF0",
                           "2723", "2725", "7A70", "7AF0", "51F0", "51F1", "54F0", "7F70"];
         Check(ActiveProfiles.Count == intel.Length + 1, $"{ActiveProfiles.Count} active profiles, expected {intel.Length + 1}");
+        const string be = @"pci\ven_10ec&dev_b852&subsys_b85217aa\4&1";
+        const string beAlternate = @"PCI\VEN_10EC&DEV_B85B&REV_00\4&1";
+        const string ax210 = @"PCI\VEN_8086&DEV_2725";
+        Check(MatchActive(be) is null && Classify(be) == Rtl8852be, "RTL8852BE must have a separate experimental profile");
+        Check((MatchPreview(be) == Rtl8852be) == ExperimentalBuild && (MatchPreview(ax210) is null) == ExperimentalBuild &&
+              Classify(beAlternate) == Rtl8852beAlternate &&
+              (MatchPreview(beAlternate) == Rtl8852beAlternate) == ExperimentalBuild &&
+              MatchPreview(@"PCI\VEN_10EC&DEV_B8520") is null && MatchPreview(@"PCI\VEN_10EC&DEV_B85B0") is null &&
+              MatchPreview(@"PCI\VEN_10EC&DEV_C852") is null,
+              "each preview must take only its exact PCI ID");
+        Check(SameLaunch(BuildRadioLaunch(Rtl8852be, 149, false, "US", "unused", true, true),
+                         "airdraft-radio-rtl8852be.exe", "149", "--width", "20", "--no-block-ack", "--no-aggregate", "--no-quick-submit"),
+            "unexpected RTL8852BE launch options");
+        Check(InitialRadioChannel(Rtl8852be, 6, 149) == 6 &&
+              InitialRadioChannel(Rtl8852beAlternate, 6, 44) == 6 &&
+              InitialRadioChannel(Rtl8852be, 44, 149) == 44 &&
+              InitialRadioChannel(Classify(ax210)!, 6, 149) == 149 &&
+              InitialRadioChannel(Classify(ax210)!, 6, 0) == 6,
+              "a Realtek session must rediscover the peer channel and both backends must honor the configured fallback");
         foreach (var dev in intel)
         {
             var id = $"PCI\\VEN_8086&DEV_{dev}&SUBSYS_00748086&REV_00\\3&11583659&0&A3";
@@ -279,35 +329,35 @@ public static class CardCatalog
         var iwx = ActiveProfiles[0];
         Check(iwx.Backend == RadioBackendKind.Iwx, $"ActiveProfiles[0] backend {iwx.Backend}, expected Iwx");
         Check(SameLaunch(BuildRadioLaunch(iwx, 6, false, "", null, false, false),
-                         "nekodrop-radio.exe", "6", "--width", "20", "--tx-window", "64"),
+                         "airdraft-radio.exe", "6", "--width", "20", "--tx-window", "64"),
               "Iwx ch 6 default launch args");
         Check(SameLaunch(BuildRadioLaunch(iwx, 149, false, "JP", @"C:\run\sta.conf", true, true),
-                         "nekodrop-radio.exe", "149", "--width", "80", "--country", "JP",
+                         "airdraft-radio.exe", "149", "--width", "80", "--country", "JP",
                          "--sta-config", @"C:\run\sta.conf", "--tx-window", "64", "--aggregate", "--fast-unlock"),
               "Iwx full flags launch args");
         Check(SameLaunch(BuildRadioLaunch(iwx, 149, false, "", @"C:\run\sta.conf", false, false, true),
-                         "nekodrop-radio.exe", "149", "--width", "80", "--sta-config", @"C:\run\sta.conf",
+                         "airdraft-radio.exe", "149", "--width", "80", "--sta-config", @"C:\run\sta.conf",
                          "--tx-window", "64", "--coex-plan"),
               "Iwx coexistence plan launch args");
         Check(SameLaunch(BuildRadioLaunch(iwx, 44, true, "US", null, true, true, true),
-                         "nekodrop-radio.exe", "44", "--width", "80", "--kernel", "--country", "US"),
+                         "airdraft-radio.exe", "44", "--width", "80", "--kernel", "--country", "US"),
               "Iwx kernel mode must suppress the user-mode radio's options");
         Check(SameLaunch(BuildRadioLaunch(iwx, 149, false, "", null, false, false, btCoexBalanced: true),
-                         "nekodrop-radio.exe", "149", "--width", "80", "--tx-window", "64", "--bt-coex", "1"),
+                         "airdraft-radio.exe", "149", "--width", "80", "--tx-window", "64", "--bt-coex", "1"),
               "Iwx balanced Bluetooth coexistence launch args");
         Check(SameLaunch(BuildRadioLaunch(iwx, 149, true, "", null, false, false, btCoexBalanced: true),
-                         "nekodrop-radio.exe", "149", "--width", "80", "--kernel"),
+                         "airdraft-radio.exe", "149", "--width", "80", "--kernel"),
               "Iwx kernel mode must suppress --bt-coex");
         if (r is not null)
         {
             Check(SameLaunch(BuildRadioLaunch(r, 6, true, "JP", @"C:\run\sta.conf", true, true),
-                             "nekodrop-radio-rtl.exe", "6", "--width", "20"),
+                             "airdraft-radio-rtl.exe", "6", "--width", "20"),
                   "Devourer ch 6 must strip all Intel flags");
             Check(SameLaunch(BuildRadioLaunch(r, 149, false, "", null, false, false, btCoexBalanced: true),
-                             "nekodrop-radio-rtl.exe", "149", "--width", "80"),
+                             "airdraft-radio-rtl.exe", "149", "--width", "80"),
                   "Devourer must not get --bt-coex");
             Check(SameLaunch(BuildRadioLaunch(r, 149, false, "", null, false, false),
-                             "nekodrop-radio-rtl.exe", "149", "--width", "80"),
+                             "airdraft-radio-rtl.exe", "149", "--width", "80"),
                   "Devourer ch 149 default launch args");
         }
 
@@ -325,7 +375,7 @@ public static class CardCatalog
             Check(mq.HardwareId == "PCI\\VEN_8086&DEV_9999" && mq.Backend == RadioBackendKind.Iwx && mq.RadioFamily == "qu",
                   $"manual qu profile {mq.HardwareId} {mq.Backend} {mq.RadioFamily}");
             Check(SameLaunch(BuildRadioLaunch(mq, 6, false, "", null, false, false),
-                             "nekodrop-radio.exe", "6", "--width", "20", "--tx-window", "64", "--family", "qu"),
+                             "airdraft-radio.exe", "6", "--width", "20", "--tx-window", "64", "--family", "qu"),
                   "manual qu launch args");
         }
         var mr = ManualProfile("PCI\\VEN_10EC&DEV_C852", "rtl8852ce");
@@ -335,7 +385,7 @@ public static class CardCatalog
         Check(ManualProfile("USB\\VID_0BDA&PID_8812", "rtl8852ce") is null, "a USB device accepted");
         Check(ManualModels.Select(x => x.Key).Distinct().Count() == ManualModels.Count, "duplicate manual model keys");
 
-        // Ethernet chips from the same vendors and Wi-Fi cards nekodrop does not know.
+        // Ethernet chips from the same vendors and Wi-Fi cards Airdraft does not know.
         foreach (var other in new[] { "PCI\\VEN_8086&DEV_15F3&SUBSYS_00008086\\1", "PCI\\VEN_10EC&DEV_8168&SUBSYS_00000000\\1",
                                       "PCI\\VEN_14C3&DEV_7922&SUBSYS_00000000\\1", "PCI\\VEN_8086&DEV_7E40&SUBSYS_00908086\\1" })
         {

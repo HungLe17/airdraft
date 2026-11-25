@@ -126,12 +126,14 @@ void NekoAwdlRun(NEKO_DEVICE *dev, NEKO_JOB *job) {
     if (inLength < sizeof(NEKO_ATTACH) || outLength < sizeof(NEKO_INFO)) { st = STATUS_INVALID_PARAMETER; break; }
     const auto *a = static_cast<const NEKO_ATTACH *>(in);
     if (!dev->HwOpen) { st = STATUS_DEVICE_NOT_READY; break; }
-    NekoScanAbort(dev);
+    if (dev->Scanning) { st = STATUS_DEVICE_BUSY; break; }
     Flush(dev);
+    if (!khal_retune_listener(a->channel, a->width ? a->width : (a->channel > 14 ? 80 : 20)) ||
+        !khal_set_listener_address(a->address) || !khal_set_promiscuous(true)) {
+      st = STATUS_UNSUCCESSFUL;
+      break;
+    }
     dev->HomeChannel = a->channel;
-    khal_set_channel(a->channel, a->width ? a->width : (a->channel > 14 ? 80 : 20));
-    khal_set_listener_address(a->address);
-    khal_set_promiscuous(true);
     khal_set_tx_status(OnTxStatus, dev);
     dev->AwdlAttached = TRUE;
     auto *o = static_cast<NEKO_INFO *>(out);
@@ -157,8 +159,12 @@ void NekoAwdlRun(NEKO_DEVICE *dev, NEKO_JOB *job) {
   }
   case IOCTL_NEKO_SET_CHANNEL:
     if (inLength < 2) { st = STATUS_INVALID_PARAMETER; break; }
+    if (dev->Scanning) { st = STATUS_DEVICE_BUSY; break; }
+    if (!khal_retune_listener(b[0], b[1] ? b[1] : (b[0] > 14 ? 80 : 20))) {
+      st = STATUS_UNSUCCESSFUL;
+      break;
+    }
     dev->HomeChannel = b[0];
-    if (!dev->Scanning && !khal_set_channel(b[0], b[1] ? b[1] : (b[0] > 14 ? 80 : 20))) st = STATUS_UNSUCCESSFUL;
     break;
   case IOCTL_NEKO_SET_ADDRESS:
     if (inLength < 6 || !khal_set_listener_address(b)) st = STATUS_INVALID_PARAMETER;
@@ -180,7 +186,8 @@ void NekoAwdlRun(NEKO_DEVICE *dev, NEKO_JOB *job) {
   case IOCTL_NEKO_SET_COUNTRY: {
     if (inLength < 2 || outLength < 1) { st = STATUS_INVALID_PARAMETER; break; }
     const char a2[3] = {static_cast<char>(b[0]), static_cast<char>(b[1]), 0};
-    *static_cast<UCHAR *>(out) = khal_set_country(a2) ? 1 : 0;
+    // A peer's country code must not change the channel map for Windows Wi-Fi.
+    *static_cast<UCHAR *>(out) = dev->Conn == ConnIdle && !dev->Scanning && khal_set_country(a2) ? 1 : 0;
     info = 1;
     break;
   }
@@ -188,7 +195,7 @@ void NekoAwdlRun(NEKO_DEVICE *dev, NEKO_JOB *job) {
     if (outLength < sizeof(NEKO_STATUS)) { st = STATUS_BUFFER_TOO_SMALL; break; }
     auto *s = static_cast<NEKO_STATUS *>(out);
     RtlZeroMemory(s, sizeof(*s));
-    s->healthy = khal_healthy();
+    s->healthy = khal_listener_healthy();
     s->promiscuous = khal_promiscuous();
     s->channel = khal_channel();
     s->width = static_cast<UCHAR>(khal_width());

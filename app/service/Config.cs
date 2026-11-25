@@ -4,7 +4,7 @@ using System.Security.Principal;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace NekoDrop.Service;
+namespace Airdraft.Service;
 
 /// <summary>How Wi-Fi and AirDrop share the card.</summary>
 public enum NetMode
@@ -17,7 +17,15 @@ public enum NetMode
     Off,
 }
 
-/// <summary>Machine-wide settings, in %ProgramData%\nekodrop\service.json.</summary>
+public sealed record NativeWifiReturn(string InstanceId, string ProfileName, bool IPv4, bool IPv6)
+{
+    internal WifiPaths RequiredPaths => (IPv4 ? WifiPaths.IPv4 : WifiPaths.None) | (IPv6 ? WifiPaths.IPv6 : WifiPaths.None);
+    internal bool NeedsRecovery => RequiredPaths != WifiPaths.None || !string.IsNullOrEmpty(ProfileName);
+    internal bool IsRestored(WifiPaths paths, bool connected) =>
+        RequiredPaths == WifiPaths.None ? connected : (paths & RequiredPaths) == RequiredPaths;
+}
+
+/// <summary>Machine-wide settings, in %ProgramData%\Airdraft\service.json.</summary>
 public sealed class ServiceConfig
 {
     [JsonConverter(typeof(JsonStringEnumConverter))]
@@ -58,9 +66,12 @@ public sealed class ServiceConfig
     public int IdleSeconds { get; set; } = 90;
     /// <summary>Intel's own INF (oemNN.inf), remembered when the card is first taken.</summary>
     public string VendorInf { get; set; } = "";
+    public string VendorInstanceId { get; set; } = "";
+    public bool VendorDriverReturnPending { get; set; }
+    public NativeWifiReturn? PendingWifiReturn { get; set; }
 
     public static string Folder =>
-        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "nekodrop");
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), "Airdraft");
     static string FilePath => Path.Combine(Folder, "service.json");
     static readonly JsonSerializerOptions Options = new() { WriteIndented = true };
 

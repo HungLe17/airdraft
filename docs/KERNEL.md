@@ -1,5 +1,11 @@
 # nekodrop kernel driver (WiFiCx)
 
+## AX210 development build
+
+Run `powershell -ExecutionPolicy Bypass -File .\scripts\build-kdriver.ps1 -ExperimentalAx210` from the source tree. The build writes an unsigned package to `build\kdriver-ax210\package` for `8086:2725` and includes the AX210 firmware and PNVM. It also creates `build\kdriver-ax210\Airdraft-AX210-WiFiCx-unsigned.cab` with the driver symbols for signing. The preview installer uses its separate register-proxy driver. [Microsoft driver attestation](https://learn.microsoft.com/en-us/windows-hardware/drivers/dashboard/code-signing-attestation)
+
+This WiFiCx prototype keeps the Windows Wi-Fi station configured when the Airdraft radio opens or closes its AWDL session. It replaces Intel's driver at installation. Moving between 2.4 and 5 GHz rebuilds the AWDL listener on firmware that supports dynamic quotas. The operation uses the listener's queues, MAC, binding and PHY and refuses a move if the station shares that binding. AX210 signing and physical checks are still pending. [Microsoft kernel driver signing](https://learn.microsoft.com/en-us/windows/security/operating-system-security/driver-security/kernel-mode-code-signing-and-integrity)
+
 Why: with the user-mode radio, Windows loses its Wi-Fi adapter the moment the
 card leaves Intel's driver (no Wi-Fi switch, no network list; internet only
 through a TAP "Ethernet"). Windows lists Wi-Fi only from a WLAN miniport. So

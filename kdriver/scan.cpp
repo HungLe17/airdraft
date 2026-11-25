@@ -67,8 +67,7 @@ static void SendProbe(NEKO_DEVICE *dev, UCHAR channel) {
 
 static void Visit(NEKO_DEVICE *dev) {
   const UCHAR ch = dev->ScanChannels[dev->ScanIndex];
-  khal_set_channel(ch, 20);
-  const bool active = (khal_channel_flags(ch) & kNvmChannelActive) != 0;
+  const bool active = khal_set_channel(ch, 20) && (khal_channel_flags(ch) & kNvmChannelActive) != 0;
   if (active) SendProbe(dev, ch);
   dev->ScanDwellEndUs = NowUs() + (active ? kActiveDwellUs : kPassiveDwellUs);
 }

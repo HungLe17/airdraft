@@ -1,19 +1,15 @@
 # Wi-Fi Card Compatibility
 
-English · [简体中文](COMPATIBILITY.zh-CN.md) · [Back to README](../README.md) · [Architecture & Driver Roadmap](HARDWARE.md)
+[Back to README](../README.md) · [Architecture & Driver Roadmap](HARDWARE.md)
 
-nekodrop drives the Wi-Fi chip directly from user mode so Windows can speak Apple's AWDL protocol natively. As nekodrop expands beyond Intel into multi-vendor cards, every card family uses a modular backend behind `CardCatalog` and `radio_backend.h`:
-
-- **Built-in native support (no hidden experimental switches)**: once a card family's backend passes CI build and offline self-tests, it ships built-in so users can install and use it out of the box.
-- **Auto-detection first, manual selection fallback**: nekodrop automatically detects supported PCIe Wi-Fi cards; multi-NIC / unmatched-ID manual selection at install time and in Settings is actively being rolled out.
-- **Honest verification status**: we distinguish **Author-tested**, **User-reported working**, **Built-in (untested)**, and **In development / Planned**.
+Airdraft uses a user-mode radio to run Apple's AWDL protocol on compatible Wi-Fi cards. The current preview targets the Intel AX210. The local combined build also includes the experimental Realtek RTL8852BE backend. Other entries describe the source catalog and earlier backend testing. [Build and adapter selection](../README.md#experimental-rtl8852be-development)
 
 ## Networking Modes by Capability
 
 | Mode | What it does | Required radio capability |
 |---|---|---|
-| **Wi-Fi + AirDrop together (Concurrent)** | nekodrop runs both your Wi-Fi connection and AWDL on one card. | Backend includes a user-mode Wi-Fi station (`supports_station = true`). |
-| **On-Demand** | Windows' native driver runs Wi-Fi normally; nekodrop takes the card only while sending/receiving AirDrop and hands it right back. | Core AWDL listener/injector only (works for cards without a user-mode Wi-Fi station). |
+| **Wi-Fi + AirDrop together (Concurrent)** | Airdraft runs Wi-Fi and AWDL on one card where the connection can be protected. | Backend includes a user-mode Wi-Fi station (`supports_station = true`). |
+| **On-Demand** | Airdraft borrows the card during an AirDrop session. Windows reconnects through its native driver when the session ends. | Core AWDL listener and injector. |
 
 ---
 
@@ -38,8 +34,9 @@ nekodrop drives the Wi-Fi chip directly from user mode so Windows can speak Appl
 
 | Card / Family | PCI Device IDs | Modes | Status |
 |---|---|---|---|
-| **Realtek RTL8852CE** | `C852` | On-Demand (native Wi-Fi kept by Windows) | ⚠️ **Built-in, untested inside nekodrop** (ships native `nekodrop-radio-rtl.exe` from [winawdl](https://github.com/raph559/winawdl)/`devourer` with A-MPDU; compiled and offline-tested in CI, awaiting real-hardware confirmation inside nekodrop; Intel default behavior unchanged) |
-| **Realtek RTL8852BE / RTL8851BE** | `B852` `B85B` `B851` | On-Demand | 🚧 Planned right after RTL8852CE (leverages `OpenIPC/devourer` `KESTREL_8852B`) |
+| **Realtek RTL8852CE** | `C852` | On-Demand | Backend in source. The current preview packages target AX210 and RTL8852BE. |
+| **Realtek RTL8852BE** | `B852` `B85B` | On-Demand | Experimental local build. Radio bring-up, Wi-Fi recovery, and Apple transfers still need hardware testing. |
+| Realtek RTL8851BE | `B851` | On-Demand | 🚧 Planned |
 | Realtek RTL8852AE / RTL8922AE | `8852` `8922` | On-Demand | 🗓️ Planned |
 
 ---
@@ -65,7 +62,7 @@ nekodrop drives the Wi-Fi chip directly from user mode so Windows can speak Appl
 
 ## How to Check Your Card
 
-Run the standalone diagnostic script without installing nekodrop:
+Run the standalone diagnostic script to check a PC before installing Airdraft.
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File installer\report.ps1

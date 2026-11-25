@@ -1,6 +1,6 @@
 # AirDrop Throughput Testing
 
-[Back to README](../README.md) · [Client and service design](CLIENT.md) · [Wi-Fi card compatibility](COMPATIBILITY.md)
+[Back to README](../README.md) · [Wi-Fi card compatibility](COMPATIBILITY.md)
 
 This guide describes how to produce AirDrop throughput numbers that can be compared across modes, versions and machines. It is a testing method, not a promise of a particular speed.
 
@@ -13,7 +13,7 @@ Change one variable at a time. A useful first matrix is:
 | # | Mode | Wi-Fi station | AirDrop channel | Notes |
 |---|---|---|---|---|
 | A | Concurrent | Connected, station on channel 40 | 149 | The common “Wi-Fi and AirDrop together” case |
-| B | Concurrent | Explicitly disconnected in nekodrop | 149 | No station, but still Concurrent |
+| B | Concurrent | Explicitly disconnected | 149 | No station, but still Concurrent |
 | C | On-Demand | No station | 149 | The card is taken only for the transfer |
 | D | Concurrent | Connected, station on channel 149 | 149 | Same-channel control, if the router allows it |
 
